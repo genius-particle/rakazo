@@ -36,6 +36,10 @@ on:
         description: 'JSON array of architectures, e.g. ["amd64"]. Empty builds all.'
         type: string
         default: ""
+      tag:
+        description: 'Extra tag to publish, e.g. edge. Empty publishes only sha-<commit>.'
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -305,10 +309,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: app
-          - name: updater
-          - name: computer
+        # A narrowed dispatch must not try to publish an image it never built: no digest artifact
+        # exists for it, so the download step would fail with nothing to merge.
+        name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.images != '' && fromJSON(github.event.inputs.images) || fromJSON('["app","updater","computer"]') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -327,3 +330,6 @@ jobs:
         with:
           image: ghcr.io/${{ github.repository }}/${{ matrix.name }}
           digests-directory: /tmp/digests
+          # Only the architectures this run actually built can be verified in the final manifest.
+          archs: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.archs != '' && join(fromJSON(github.event.inputs.archs), ' ') || '' }}
+          tag: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || '' }}

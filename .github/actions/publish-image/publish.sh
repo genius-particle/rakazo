@@ -14,9 +14,12 @@ for file in "${files[@]}"; do
   sources+=("${IMAGE:?}@sha256:${digest}")
 done
 
-# Verify both platforms before making any tag discoverable.
+# Verify every platform this run built before making any tag discoverable. A narrowed dispatch may
+# build a single architecture, so the expected set comes from the caller and defaults to both.
+read -r -a expected_archs <<< "${EXPECTED_ARCHS:-amd64 arm64}"
+[[ ${#expected_archs[@]} -ge 1 ]] || { echo "No expected architectures." >&2; exit 1; }
 manifest="$(docker buildx imagetools create --dry-run "${sources[@]}")"
-for arch in amd64 arm64; do
+for arch in "${expected_archs[@]}"; do
   jq -e --arg arch "$arch" \
     'any(.manifests[]; .platform.os == "linux" and .platform.architecture == $arch)' \
     <<< "$manifest" >/dev/null || { echo "Image is missing linux/$arch." >&2; exit 1; }
