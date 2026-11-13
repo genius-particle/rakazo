@@ -27,6 +27,15 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
   workflow_dispatch:
+    inputs:
+      images:
+        description: "Comma separated images to build (app, computer, updater). Empty builds all."
+        type: string
+        default: ""
+      archs:
+        description: "Comma separated architectures (amd64, arm64). Empty builds all."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -103,7 +112,10 @@ jobs:
     # A Depot outage must not block deploys, so any failed Depot build rebuilds every image here.
     if: >-
       !cancelled() && github.event_name != 'pull_request' &&
-      (vars.DEPOT_PROJECT_ID == '' || contains(needs.build-depot.outputs.*, 'failed'))
+      (vars.DEPOT_PROJECT_ID == '' || contains(needs.build-depot.outputs.*, 'failed')) &&
+      (github.event_name != 'workflow_dispatch' ||
+       ((github.event.inputs.images == '' || contains(github.event.inputs.images, matrix.name)) &&
+        (github.event.inputs.archs == '' || contains(github.event.inputs.archs, matrix.arch))))
     needs: [build-depot]
     # Each architecture builds natively on its own runner and pushes by digest only.
     # No QEMU: GitHub hosts native arm64 runners, and emulated arm64 took hours for the
