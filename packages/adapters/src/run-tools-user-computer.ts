@@ -10,6 +10,11 @@ import type {
 } from "./host-screen.js";
 import { HOST_SCREEN_MAX_ACTIONS, hostScreenAction } from "./host-screen.js";
 import { nativeShellCommandArgv } from "./native-shell.js";
+import {
+  IMAGE_READ_MAX_BYTES,
+  imageMimeFromPath,
+  imageToolResultFromBytes,
+} from "./read-file-image.js";
 import type { RunContext } from "./run-context.js";
 import type { ToolCall } from "./run-tool-gate.js";
 import {
@@ -20,15 +25,18 @@ import {
 import {
   USER_COMPUTER_ACT_TOOL,
   USER_COMPUTER_OBSERVE_TOOL,
+  USER_COMPUTER_READ_TOOL,
   USER_COMPUTER_SCREEN_TOOLS,
   USER_COMPUTER_SHELL_TOOL,
   USER_COMPUTER_TOOLS,
   userComputerAppName,
 } from "./user-computer-tools.js";
+import { MAX_MODEL_FILE_BYTES, readFileRangeResult } from "./workspace-file-tools.js";
 
 export {
   USER_COMPUTER_ACT_TOOL,
   USER_COMPUTER_OBSERVE_TOOL,
+  USER_COMPUTER_READ_TOOL,
   USER_COMPUTER_SCREEN_TOOLS,
   USER_COMPUTER_SHELL_TOOL,
   USER_COMPUTER_TOOLS,
@@ -42,8 +50,8 @@ const USER_COMPUTER_UNAVAILABLE =
   'The user\'s computer is not connected. If the task needs it, ask them to open the Rakazo desktop app and turn on "Let bots use this computer" in its settings.';
 
 /**
- * Whose own computer this run may reach: the person whose message started it, when they own the
- * bot. Routines, webhooks, channels, other bots and other people's messages reach no one's.
+ * Whose own computer this run may reach. Local deployment: any run whose user owns the bot,
+ * including routines, webhooks, and channels. A run by someone else reaches no one's computer.
  */
 export function userComputerOwner(input: {
   trigger: string;
@@ -52,67 +60,205 @@ export function userComputerOwner(input: {
   runUserId: string;
   botUserId: string;
 }): string | undefined {
-  if (input.trigger !== "user" && input.trigger !== "follow_up") return undefined;
-  if (input.sourceRole !== "user" || input.messagingChannelRun) return undefined;
+  // 本地部署补丁：不限制渠道/触发源，仅保留 bot 归属校验。
   return input.runUserId === input.botUserId ? input.runUserId : undefined;
 }
 
 /**
- * The user's own computer always asks a person first, in every approval mode and whatever the
- * rules allow, until they choose "Allow in this space"; a block still refuses it. These tools run
- * only in the user's own runs (see userComputerOwner), so any effect of them past "intended" in
- * this space traces back to that approval. Removing every paired computer ends it, so pairing again
- * asks again. Screen control is approved per app.
+ * Local deployment: the user's computer does not ask on every call. A block rule still denies it.
  */
 export async function userComputerGate(
-  ctx: RunContext,
+  _ctx: RunContext,
   blocked: boolean,
-  name: string,
-  args: Record<string, unknown>,
+  _name: string,
+  _args: Record<string, unknown>,
 ): Promise<"deny" | "allow" | "ask"> {
   if (blocked) return "deny";
-  const { deps, run } = ctx;
-  const pairedSince = await deps.userDevices?.pairedSince(run.userId);
-  if (!pairedSince) return "ask";
-  const where = {
-    spaceId: run.spaceId,
-    status: { in: ["approved", "executing", "completed", "uncertain"] },
-    createdAt: { gte: pairedSince },
-    run: { userId: run.userId },
-  };
-  if (!USER_COMPUTER_SCREEN_TOOLS.has(name)) {
-    const allowed = await deps.prisma.externalEffect.findFirst({
-      where: { ...where, kind: USER_COMPUTER_SHELL_TOOL },
-      select: { id: true },
-    });
-    return allowed ? "allow" : "ask";
-  }
-  const app = userComputerAppName(args.app).toLowerCase();
-  if (!app) return "ask";
-  // Every screen action records an effect, so page through them rather than cap the search.
-  let cursor: string | undefined;
-  for (;;) {
-    const page = await deps.prisma.externalEffect.findMany({
-      where: { ...where, kind: { in: [...USER_COMPUTER_SCREEN_TOOLS] } },
-      select: { id: true, request: true },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: SCREEN_APPROVAL_PAGE,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    });
-    if (
-      page.some(
-        (effect) =>
-          userComputerAppName((effect.request as { app?: unknown } | null)?.app).toLowerCase() ===
-          app,
-      )
-    )
-      return "allow";
-    if (page.length < SCREEN_APPROVAL_PAGE) return "ask";
-    cursor = page.at(-1)!.id;
-  }
+  // 本地部署补丁：不再逐次索取审批（Block 规则依然生效）。
+  return "allow";
 }
 
-const SCREEN_APPROVAL_PAGE = 200;
+/** Resolve a file path on the user's computer: it must stay inside their home folder. */
+export function userComputerFilePath(
+  environment: HostComputerEnvironment,
+  filePath: unknown,
+): string {
+  const paths = environment.platform === "win32" ? path.win32 : path.posix;
+  const requested = typeof filePath === "string" ? filePath.trim() : "";
+  if (!requested || requested === "~") {
+    throw new Error("path must name a file inside the user's home folder");
+  }
+  const expanded = /^~[\\/]/.test(requested)
+    ? paths.join(environment.home, requested.slice(2))
+    : requested;
+  const resolved = paths.resolve(environment.home, expanded);
+  const relative = paths.relative(environment.home, resolved);
+  if (
+    relative === "" ||
+    relative === ".." ||
+    relative.startsWith(`..${paths.sep}`) ||
+    paths.isAbsolute(relative)
+  ) {
+    throw new Error("path must be inside the user's home folder");
+  }
+  return resolved;
+}
+
+/** Fixed argv: the path is passed only in RAKAZO_READ_PATH, never interpolated into the command. */
+export function readUserComputerFileArgv(platform: string): string[] {
+  if (platform === "win32") {
+    return [
+      "powershell.exe",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "$p = $env:RAKAZO_READ_PATH; $m = [int64]$env:RAKAZO_READ_MAX; $i = Get-Item -LiteralPath $p; if ($i.PSIsContainer) { throw 'path must name a file' }; if ($i.Length -gt $m) { throw 'file is too large' }; [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))",
+    ];
+  }
+  return [
+    "sh",
+    "-c",
+    'p=$RAKAZO_READ_PATH; m=$RAKAZO_READ_MAX; if [ ! -f "$p" ]; then echo "file not found or unreadable" >&2; exit 2; fi; sz=$(wc -c < "$p" | tr -d "[:space:]"); if [ "$sz" -gt "$m" ]; then echo "file is too large" >&2; exit 3; fi; base64 < "$p"',
+  ];
+}
+
+async function collectExecuteOutput(events: AsyncIterable<unknown>): Promise<{
+  stdout: string;
+  stderr: string;
+  code: number | undefined;
+}> {
+  let stdout = "";
+  let stderr = "";
+  let code: number | undefined;
+  for await (const event of events) {
+    if (!event || typeof event !== "object") continue;
+    const frame = event as { type?: unknown; data?: unknown; code?: unknown; heartbeat?: unknown };
+    if (frame.heartbeat === true) continue;
+    if (frame.type === "stdout" && typeof frame.data === "string") stdout += frame.data;
+    else if (frame.type === "stderr" && typeof frame.data === "string") stderr += frame.data;
+    else if (frame.type === "exit" && typeof frame.code === "number") code = frame.code;
+  }
+  return { stdout, stderr, code };
+}
+
+function decodeBase64File(stdout: string): Uint8Array | undefined {
+  const packed = stdout.replace(/\s+/g, "");
+  if (!packed) return new Uint8Array();
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(packed) || packed.length % 4 !== 0) return undefined;
+  return Buffer.from(packed, "base64");
+}
+
+export async function userComputerRead(ctx: RunContext, call: ToolCall) {
+  const filePath = String(call.args.path ?? "").trim();
+  if (!filePath)
+    return call.finish({ error: "path must name a file inside the user's home folder" });
+  const connected = await connectedUserComputer(ctx);
+  if (!connected) return call.finish({ error: USER_COMPUTER_UNAVAILABLE });
+  const { owner, devices, deviceId } = connected;
+  const { signal } = ctx.context;
+  try {
+    await lastValue(
+      devices.request(
+        owner,
+        { method: "provision", botId: ctx.bot.id, runId: ctx.runId },
+        signal,
+        deviceId,
+      ),
+    );
+    const environment = await lastValue(
+      devices.request<HostComputerEnvironment>(
+        owner,
+        { method: "environment", botId: ctx.bot.id, runId: ctx.runId },
+        signal,
+        deviceId,
+      ),
+    );
+    let resolved: string;
+    try {
+      resolved = userComputerFilePath(environment, filePath);
+    } catch (error) {
+      return call.finish({
+        error:
+          error instanceof Error ? error.message : "path must be inside the user's home folder",
+        path: filePath,
+      });
+    }
+    const output = await collectExecuteOutput(
+      devices.request(
+        owner,
+        {
+          method: "execute",
+          botId: ctx.bot.id,
+          runId: ctx.runId,
+          command: {
+            argv: readUserComputerFileArgv(environment.platform),
+            cwd: environment.home,
+            env: {
+              RAKAZO_READ_PATH: resolved,
+              RAKAZO_READ_MAX: String(IMAGE_READ_MAX_BYTES),
+            },
+            timeoutMs: sandboxCommandTimeoutMs(),
+          },
+        },
+        signal,
+        deviceId,
+      ),
+    );
+    if (output.code !== 0) {
+      const reason = redactSecrets(
+        (output.stderr || output.stdout || "file not found or unreadable").trim() ||
+          "file not found or unreadable",
+        ctx.secrets,
+      );
+      return call.finish({
+        error: `The user's computer could not read the file: ${reason}`,
+        path: filePath,
+      });
+    }
+    const bytes = decodeBase64File(output.stdout);
+    if (!bytes) {
+      return call.finish({
+        error: "The user's computer returned unreadable file data",
+        path: filePath,
+      });
+    }
+    if (imageMimeFromPath(filePath) || imageMimeFromPath(resolved)) {
+      return call.finish(
+        await imageToolResultFromBytes({
+          path: filePath,
+          bytes,
+          acceptsImages: Boolean(ctx.computer.acceptsImages),
+        }),
+      );
+    }
+    if (bytes.byteLength > MAX_MODEL_FILE_BYTES) {
+      return call.finish({
+        error: "file is too large for model context",
+        path: filePath,
+        size: bytes.byteLength,
+      });
+    }
+    let decoded: string;
+    try {
+      decoded = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    } catch {
+      return call.finish({
+        error: "file is not UTF-8 text and is not a png, jpeg, gif, or webp image",
+        path: filePath,
+      });
+    }
+    return call.finish(
+      readFileRangeResult(filePath, redactSecrets(decoded, ctx.secrets), call.args),
+    );
+  } catch (error) {
+    if (signal.aborted) throw error;
+    const reason = redactSecrets(
+      error instanceof Error ? error.message : "read failed",
+      ctx.secrets,
+    );
+    return call.finish({ error: `The user's computer did not finish the read: ${reason}` });
+  }
+}
 
 /** The working directory on the user's computer: their home or a folder inside it. */
 export function userComputerCwd(environment: HostComputerEnvironment, cwd: unknown): string {

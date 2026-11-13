@@ -95,8 +95,13 @@ export async function loadCurrentTurnImages(
   return images.length ? images : undefined;
 }
 
-/** User turns whose attached images stay hydrated for the model. */
-export const RECENT_TURN_IMAGE_TURNS = 3;
+/**
+ * How many recent *user* turns (any content, not only image-bearing) may contribute
+ * rehydrated images. Older image turns keep the `[image: name]` text marker only.
+ * Counts every user message for proximity so screenshots from earlier in the 200-message
+ * window do not stick to unrelated follow-ups.
+ */
+export const RECENT_TURN_IMAGE_TURNS = 2;
 
 /** Total hydrated history image bytes, matching the per-attachment ceiling. */
 export const RECENT_TURN_IMAGE_BYTES = ATTACHMENT_MAX_BYTES;
@@ -277,12 +282,17 @@ function markUnavailableHistoryImages(
 }
 
 /**
- * Hydrate the images of the most recent user turns in the run history.
+ * Hydrate images from nearby prior user turns in the run history.
  *
  * Earlier turns reached the model only as an `[image: name]` marker, so a question asked one
- * turn after the upload had nothing to look at. Bounded by `maxTurns`, a total byte ceiling, and
+ * turn after the upload had nothing to look at. `maxTurns` is a *proximity* budget: it counts
+ * every prior user message (text or image), not only image-bearing ones, so an old screenshot
+ * buried under later text does not re-enter the prompt. Also bounded by a total byte ceiling and
  * the model connection's image limit; once a newer picture is left out, older turns are not
  * backfilled. Bytes are read through the same artifact path and space/user scope as the current turn.
+ * The current message's own images stay on `currentTurnImages`, not here.
+ * Callers should skip this helper when the current turn has no images; otherwise a
+ * text-only follow-up still rehydrates nearby screenshots into the model prompt.
  */
 export async function withRecentTurnImages(
   deps: ExecutorDeps,
@@ -319,9 +329,11 @@ export async function withRecentTurnImages(
   for (let index = history.length - 1; index >= 0 && turns < maxTurns; index -= 1) {
     const entry = history[index];
     if (!entry?.id || entry.role !== "user" || entry.id === options.skipMessageId) continue;
+    // Count every user turn for proximity — do not skip text-only turns, or old
+    // screenshots far up the thread keep rehydrating into unrelated follow-ups.
+    turns += 1;
     const blocks = blocksByMessageId.get(entry.id);
     if (!blocks?.some((block) => block.kind === "image")) continue;
-    turns += 1;
     if (remainingImages <= 0 || remainingBytes <= 0) break;
     const loaded = await loadTurnImagesWithinBudget(deps, blocks, context, {
       remainingBytes,
@@ -370,6 +382,8 @@ export async function claimRunSteering(
   context: Parameters<typeof loadCurrentTurnImages>[2],
   pendingTurnFiles: MessageBlock[][],
   currentTurn: { messageId?: string; hasImages: boolean },
+  /** Paths the file tools may show. Steering uploads join the current turn. */
+  turnAttachmentPaths?: Set<string>,
 ): Promise<AgentSteeringMessage[]> {
   const steering = await deps.events.claimSteering({ ...lease, seenIds });
   return Promise.all(
@@ -380,7 +394,10 @@ export async function claimRunSteering(
         item.blocks,
         context.signal,
       );
-      if (files.length) pendingTurnFiles.push(item.blocks);
+      if (files.length) {
+        pendingTurnFiles.push(item.blocks);
+        for (const file of files) turnAttachmentPaths?.add(file.path);
+      }
       const filesInstruction = currentTurnFilesInstruction(files);
       return {
         id: item.id,

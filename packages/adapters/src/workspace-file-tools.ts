@@ -16,8 +16,19 @@ import {
   plotSvgToPng,
   renderPlotSpecToSvg,
 } from "./plot-tool.js";
+import {
+  IMAGE_READ_MAX_BYTES,
+  imageFileTooLargeError,
+  imageMimeFromPath,
+  imageToolResultFromBytes,
+} from "./read-file-image.js";
 import { publishMessage } from "./run-messages.js";
 import { attachWorkspaceFileToThread } from "./thread-artifacts.js";
+import {
+  attachmentTurnVisible,
+  listedWorkspacePath,
+  staleTurnAttachmentError,
+} from "./turn-attachment-gate.js";
 /** The bot workspace a run reaches on its computer. */
 export type RunWorkspace = {
   botId: string;
@@ -26,9 +37,15 @@ export type RunWorkspace = {
   markDirty: () => void;
   context: AdapterContext;
   runSecrets: string[];
+  /**
+   * `attachments/<file>` paths copied for this turn. Every other platform attachment
+   * copy is omitted from listings and refused by reads, so an older image cannot
+   * come back as this turn's picture. Unset hides all of those copies.
+   */
+  turnAttachmentPaths?: ReadonlySet<string>;
 };
 
-const MAX_MODEL_FILE_BYTES = 250_000;
+export const MAX_MODEL_FILE_BYTES = 250_000;
 
 /** An optional argument the model must send as a positive integer; anything else is ignored. */
 export function positiveIntegerArg(value: unknown): number | undefined {
@@ -50,7 +67,7 @@ type ReadFileRangeResult = {
  * TOOL_RESULT_TEXT_LIMIT, so the model reads a large file chunk by chunk through nextOffset
  * and never meets the generic tool-result truncation.
  */
-function readFileRangeResult(
+export function readFileRangeResult(
   filePath: string,
   text: string,
   args: Record<string, unknown>,
@@ -167,14 +184,26 @@ export async function listFilesFromTool(
   );
   return {
     path: requestedPath,
-    entries: entries.map((entry) => ({
-      ...entry,
-      // A file name can carry a value an earlier command or page wrote.
-      path: redactSecrets(
-        displayBotWorkspacePath(computerMode, botId, requestedPath, entry.path),
-        runSecrets,
-      ),
-    })),
+    entries: entries.flatMap((entry) => {
+      if (
+        !attachmentTurnVisible(
+          listedWorkspacePath(requestedPath, entry.path),
+          workspace.turnAttachmentPaths,
+        )
+      ) {
+        return [];
+      }
+      return [
+        {
+          ...entry,
+          // A file name can carry a value an earlier command or page wrote.
+          path: redactSecrets(
+            displayBotWorkspacePath(computerMode, botId, requestedPath, entry.path),
+            runSecrets,
+          ),
+        },
+      ];
+    }),
   };
 }
 
@@ -182,30 +211,47 @@ export async function readFileFromTool(
   sandbox: SandboxProvider,
   workspace: RunWorkspace,
   args: Record<string, unknown>,
+  options?: { acceptsImages?: boolean },
 ) {
   const { botId, computerMode, computer, context, runSecrets } = workspace;
   const filePath = String(args.path ?? "");
+  // Refuse before the computer starts, so an old copy is never read into an image result.
+  const stale = staleTurnAttachmentError(filePath, workspace.turnAttachmentPaths);
+  if (stale) return stale;
   const storedPath = resolveBotWorkspacePath(computerMode, botId, filePath);
+  const imageMime = imageMimeFromPath(filePath);
+  const maxBytes = imageMime ? IMAGE_READ_MAX_BYTES : MAX_MODEL_FILE_BYTES;
   let bytes: Uint8Array;
   try {
     bytes = await sandbox.readFile(await computer(), storedPath, context, {
-      maxBytes: MAX_MODEL_FILE_BYTES,
+      maxBytes,
     });
   } catch (error) {
     if (error instanceof Error && /exceeds \d+ bytes/.test(error.message)) {
-      return {
-        error: "file is too large for model context",
-        path: filePath,
-      };
+      return imageMime
+        ? imageFileTooLargeError(filePath)
+        : {
+            error: "file is too large for model context",
+            path: filePath,
+          };
     }
     throw error;
   }
-  if (bytes.byteLength > MAX_MODEL_FILE_BYTES) {
-    return {
-      error: "file is too large for model context",
+  if (bytes.byteLength > maxBytes) {
+    return imageMime
+      ? imageFileTooLargeError(filePath, bytes.byteLength)
+      : {
+          error: "file is too large for model context",
+          path: filePath,
+          size: bytes.byteLength,
+        };
+  }
+  if (imageMime) {
+    return imageToolResultFromBytes({
       path: filePath,
-      size: bytes.byteLength,
-    };
+      bytes,
+      acceptsImages: Boolean(options?.acceptsImages),
+    });
   }
   let decoded: string;
   try {
@@ -256,6 +302,8 @@ export async function renderPlotFromTool(
     const dataPath =
       typeof args.data_path === "string" && args.data_path ? args.data_path : undefined;
     if (!rows && dataPath) {
+      const stale = staleTurnAttachmentError(dataPath, workspace.turnAttachmentPaths);
+      if (stale) return stale;
       const bytes = await deps.sandbox.readFile(
         await computer(),
         resolveBotWorkspacePath(computerMode, botId, dataPath),

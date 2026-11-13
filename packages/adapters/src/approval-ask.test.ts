@@ -381,3 +381,30 @@ describe("approval card arguments", () => {
     expect(block.detail?.split("\n")).toContain("to_email: f@example.test");
   });
 });
+
+describe("user computer approval cards", () => {
+  it("asks to read a file on its own card, separate from a shell command", () => {
+    const read = buildApprovalAskBlock(
+      "effect-1",
+      "user_computer_read",
+      { path: "Pictures/shot.png" },
+      [],
+    );
+    const shell = buildApprovalAskBlock(
+      "effect-2",
+      "user_computer_shell",
+      { command: "cat Pictures/shot.png" },
+      [],
+    );
+    expect(read).toMatchObject({
+      kind: "ask",
+      text: "Read a file on your computer?",
+      detail: "Pictures/shot.png",
+    });
+    expect(shell).toMatchObject({
+      kind: "ask",
+      text: "Run on your computer?",
+      detail: "cat Pictures/shot.png",
+    });
+  });
+});

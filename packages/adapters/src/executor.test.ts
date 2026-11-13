@@ -710,14 +710,48 @@ describe("recent turn images", () => {
     { id: "m5", blocks: [{ kind: "text" as const, text: "what time is that flight?" }] },
   ];
 
-  it("hydrates recent user turns and leaves older ones as text", async () => {
+  it("hydrates nearby user turns and leaves older ones as text", async () => {
     const hydrated = await withRecentTurnImages(depsWithImages(), history, messages, context, {
       maxTurns: 2,
     });
 
-    expect(hydrated.map((entry) => entry.images?.length ?? 0)).toEqual([0, 0, 1, 1, 0]);
+    // maxTurns counts every user turn (m5 text + m4 image), so m3 is out of proximity.
+    expect(hydrated.map((entry) => entry.images?.length ?? 0)).toEqual([0, 0, 0, 1, 0]);
     expect(hydrated[3]?.images?.[0]).toMatchObject({ name: "three.png", mimeType: "image/png" });
     expect(hydrated[0]?.content).toBe("[image: one.png]");
+  });
+
+  it("caller gate: text-only turns pass maxTurns 0 and keep markers only", async () => {
+    const hydrated = await withRecentTurnImages(depsWithImages(), history, messages, context, {
+      maxTurns: 0,
+      skipMessageId: "m5",
+    });
+    expect(hydrated).toBe(history);
+    expect(hydrated.every((entry) => !entry.images?.length)).toBe(true);
+  });
+
+  it("does not rehydrate an old screenshot buried under later text-only turns", async () => {
+    const buried = [
+      { id: "old", role: "user" as const, content: "[image: ancient.png]" },
+      { id: "a1", role: "assistant" as const, content: "ok" },
+      { id: "t1", role: "user" as const, content: "later 1" },
+      { id: "a2", role: "assistant" as const, content: "ok" },
+      { id: "t2", role: "user" as const, content: "later 2" },
+      { id: "a3", role: "assistant" as const, content: "ok" },
+      { id: "t3", role: "user" as const, content: "unrelated question" },
+    ];
+    const buriedMessages = [
+      { id: "old", blocks: [imageBlock("art-old", "ancient.png")] },
+      { id: "t1", blocks: [{ kind: "text" as const, text: "later 1" }] },
+      { id: "t2", blocks: [{ kind: "text" as const, text: "later 2" }] },
+      { id: "t3", blocks: [{ kind: "text" as const, text: "unrelated question" }] },
+    ];
+    const hydrated = await withRecentTurnImages(depsWithImages(), buried, buriedMessages, context, {
+      maxTurns: 2,
+      skipMessageId: "t3",
+    });
+    expect(hydrated.map((entry) => entry.images?.length ?? 0)).toEqual([0, 0, 0, 0, 0, 0, 0]);
+    expect(hydrated[0]?.content).toBe("[image: ancient.png]");
   });
 
   it("skips the current turn and stops at the image budget", async () => {

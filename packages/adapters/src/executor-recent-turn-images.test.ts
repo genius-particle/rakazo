@@ -36,6 +36,8 @@ type RunHooks = {
   computerLeaseRenewal?: () => Promise<boolean>;
   /** The model lists the computer's files before answering, which starts the computer. */
   useComputer?: boolean;
+  /** A shell command run after the computer starts, so attachment cleanup has already run. */
+  shellCommand?: string;
   trigger?: string;
   sourceMessageId?: string;
   /** A reply bound to this run as steering, claimed before any tool runs. */
@@ -156,13 +158,15 @@ async function runWithModel(
       await onModelChange?.(switchModel.provider, switchModel.modelId);
     }
     if (hooks?.steeringBlocks) steering = (await next.claimSteering?.([])) ?? [];
-    if (hooks?.useComputer) {
+    if (hooks?.useComputer || hooks?.shellCommand) {
       const executeTool = (
         next as AgentRunRequest & {
           executeTool?: (name: string, args: Record<string, unknown>, id: string) => unknown;
         }
       ).executeTool;
-      await executeTool?.("list_files", { path: "" }, "list-1");
+      if (hooks?.useComputer) await executeTool?.("list_files", { path: "" }, "list-1");
+      if (hooks?.shellCommand)
+        await executeTool?.("shell", { command: hooks.shellCommand }, "shell-1");
     }
     yield { type: "done" as const, text: "Done" };
   });
@@ -282,7 +286,20 @@ async function runWithModel(
     vaultCredential: { findMany: vi.fn(async () => []) },
     agentSkill: { findMany: vi.fn(async () => []) },
     scratchpadItem: { findMany: vi.fn(async () => []) },
-    externalEffect: { findMany: vi.fn(async () => []) },
+    externalEffect: {
+      findMany: vi.fn(async () => []),
+      findUnique: vi.fn(async () => null),
+      findFirst: vi.fn(async () => null),
+      create: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "effect-1",
+        ...data,
+      })),
+      update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => ({
+        id: "effect-1",
+        ...data,
+      })),
+      updateMany: vi.fn(async () => ({ count: 1 })),
+    },
     spaceSettingOverride: { findUnique: async () => null },
     userActionApprovalRule: { findMany: vi.fn(async () => []) },
     userActionAutoReviewPreference: { findUnique: vi.fn(async () => null) },
@@ -351,6 +368,7 @@ async function runWithModel(
       ) as never;
     });
   }
+  const commands: Array<{ argv: string[]; env?: Record<string, string> }> = [];
   const finalizeRun = vi.fn(async () =>
     finalizeSuccessfully ? { continuationRunId: null } : null,
   );
@@ -369,6 +387,13 @@ async function runWithModel(
       writeFile,
       listFiles: vi.fn(async () => []),
       readFile: vi.fn().mockRejectedValue(new Error("missing")),
+      execute: vi.fn(async function* (
+        _computer: unknown,
+        request: { argv?: string[]; env?: Record<string, string> },
+      ) {
+        commands.push({ argv: request.argv ?? [], env: request.env });
+        yield { type: "exit" as const, code: 0 };
+      }),
       exportWorkspace,
     },
     home: { commit: vi.fn(async () => "fixture-revision") },
@@ -413,6 +438,7 @@ async function runWithModel(
     prisma,
     run,
     releaseScreen,
+    commands,
     execution,
     notificationSend,
   };
@@ -523,17 +549,16 @@ describe("recent turn images follow model vision", () => {
     expect(request.history.find((entry) => entry.id === "earlier")?.images).toBeUndefined();
   });
 
-  it("lists an earlier turn's image without starting the computer for it", async () => {
+  it("does not tell a text follow-up that an earlier image is on the computer", async () => {
     const { request, writeFile, releaseScreen } = await runWithModel(TEXT_ONLY_MODEL);
 
     expect(writeFile).not.toHaveBeenCalled();
     expect(releaseScreen).not.toHaveBeenCalled();
-    expect(request.prompt).toContain(
-      'Files attached earlier in this conversation are also on your computer:\n- "shot.png" (image/png, 4 bytes): "attachments/art-1.png"',
-    );
+    expect(request.prompt).not.toContain("attachments/art-1.png");
+    expect(request.prompt).not.toContain("also on your computer");
   });
 
-  it("puts an earlier turn's image on the computer once the bot uses it", async () => {
+  it("does not copy an earlier turn's image onto the computer when a tool starts it", async () => {
     const { request, writeFile, exportWorkspace } = await runWithModel(
       TEXT_ONLY_MODEL,
       undefined,
@@ -543,12 +568,8 @@ describe("recent turn images follow model vision", () => {
       { useComputer: true },
     );
 
-    expect(writeFile.mock.calls.map(([, file]) => file)).toEqual([
-      { path: "attachments/art-1.png", content: new Uint8Array([1, 2, 3, 4]) },
-    ]);
-    expect(request.prompt).toContain(
-      'Files attached earlier in this conversation are also on your computer:\n- "shot.png" (image/png, 4 bytes): "attachments/art-1.png"',
-    );
+    expect(writeFile).not.toHaveBeenCalled();
+    expect(request.prompt).not.toContain("attachments/art-1.png");
     expect(exportWorkspace).not.toHaveBeenCalled();
   });
 
@@ -580,16 +601,41 @@ describe("recent turn images follow model vision", () => {
     });
   });
 
-  it("attaches an earlier turn's image for a model that can see it", async () => {
+  it("does not attach an earlier turn's image when this turn has none", async () => {
     const { request, get } = await runWithModel(VISION_MODEL);
 
     expect(request.model.id).toBe(VISION_MODEL);
-    expect(request.history.find((entry) => entry.id === "earlier")?.images?.[0]).toMatchObject({
-      name: "shot.png",
-      mimeType: "image/png",
-    });
+    expect(request.history.find((entry) => entry.id === "earlier")?.images).toBeUndefined();
     expect(request.history.find((entry) => entry.id === "current")?.images).toBeUndefined();
-    expect(get).toHaveBeenCalledWith("shot.png", expect.anything());
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  it("clears leftover attachment files before shell can list them", async () => {
+    const keptNames = (command: { argv: string[]; env?: Record<string, string> } | undefined) => {
+      if (!command) return undefined;
+      if (command.argv[1] === "-eu") return command.argv.slice(6);
+      if (command.argv[0]?.toLowerCase().includes("powershell")) {
+        return (command.env?.RAKAZO_ATTACHMENT_KEEP ?? "").split("\n").filter(Boolean);
+      }
+      return undefined;
+    };
+    const textOnly = await runWithModel(TEXT_ONLY_MODEL, undefined, false, false, true, {
+      shellCommand: "ls attachments",
+    });
+    const cleanup = textOnly.commands.find((command) => keptNames(command) !== undefined);
+    const listed = textOnly.commands.find((command) =>
+      command.argv.some((part) => part.includes("ls attachments")),
+    );
+    expect(keptNames(cleanup)).toEqual([]);
+    expect(textOnly.commands.indexOf(cleanup!)).toBeLessThan(textOnly.commands.indexOf(listed!));
+    expect(textOnly.writeFile).not.toHaveBeenCalled();
+
+    const withPicture = await runWithModel(VISION_MODEL, undefined, false, false, true, {
+      pictureMessage: { waiting: false },
+      shellCommand: "ls attachments",
+    });
+    const kept = withPicture.commands.find((command) => keptNames(command) !== undefined);
+    expect(keptNames(kept)).toEqual(["art-2.png"]);
   });
 
   it("does not take a chat message waiting for its own run as a sourceless app run's turn", async () => {

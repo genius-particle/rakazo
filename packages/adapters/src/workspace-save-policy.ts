@@ -66,6 +66,9 @@ const exclusions = [
     kind: "directory",
   },
   { pattern: "(.*/)?([^/]*\\.log|core|core\\.[0-9]+)", kind: "file" },
+  // Chat attachment copies are per turn. A checkpoint must not keep them, or the next
+  // restore brings yesterday's images back into the workspace.
+  { pattern: "(bots/[^/]+/)?attachments/[^/]+", kind: "file" },
   { pattern: `\\.browser-profiles/(.*/)?(${alternatives(browserDirectories)})`, kind: "any" },
   { pattern: `\\.browser-profiles/(.*/)?(${alternatives(browserFiles)})`, kind: "entry" },
 ] as const;

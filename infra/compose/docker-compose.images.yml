@@ -290,6 +290,14 @@ x-app-environment: &app-environment # Runtime
   PHOTON_PROJECT_ID:
   PHOTON_PROJECT_SECRET:
   PHOTON_WEBHOOK_SECRET:
+  # Advisor channel (grokbot): all three mount the platform together (see .env.example).
+  MESSAGING_GROKBOT_OUTBOUND_URL:
+  MESSAGING_GROKBOT_OUTBOUND_TOKEN:
+  MESSAGING_GROKBOT_INBOUND_TOKEN:
+  MESSAGING_GROKBOT_ADDRESS:
+  MESSAGING_GROKBOT_PEER_ADDRESS:
+  MESSAGING_GROKBOT_PEER_LABEL:
+  MESSAGING_GROKBOT_REPLY_TIMEOUT_MS:
   # Optional egress proxy (Mainland / corporate). Empty = unset; either case works.
   HTTP_PROXY: ${HTTP_PROXY:-${http_proxy:-}}
   HTTPS_PROXY: ${HTTPS_PROXY:-${https_proxy:-}}

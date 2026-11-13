@@ -37,6 +37,7 @@ import {
   createConnectorRuntime,
   createMediaGenerationProvider,
   createPaymentWalletProvider,
+  createPrismaGrokbotAskStore,
   createProductAnalytics,
   createRunReconciler,
   createRunRuntime,
@@ -391,9 +392,11 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   const artifacts = createArtifactStore(env.dataDir, prisma);
   const memory = new MarkdownMemoryStore(prisma);
   // This process registers the inbound sink, so it must hold Telegram's getUpdates connection.
-  const messagingPlatforms = messagingPlatformsFromEnv(env, { pollInboundMessages: true }).filter(
-    (platform) => platform.provider !== "slack" || !env.slackClientId,
-  );
+  const messagingPlatforms = messagingPlatformsFromEnv(env, {
+    pollInboundMessages: true,
+    // The advisor channel resolves webhook replies against pending ask rows.
+    ...(env.grokbotInboundToken ? { grokbotAskStore: createPrismaGrokbotAskStore(prisma) } : {}),
+  }).filter((platform) => platform.provider !== "slack" || !env.slackClientId);
   const legacyMessaging =
     messagingOverride ??
     (isMessagingSurfaceEnabled(messagingPlatforms, {

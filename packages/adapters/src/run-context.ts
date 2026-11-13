@@ -216,8 +216,16 @@ export interface RunComputerContext {
   lazy: ReturnType<typeof lazyRunComputer>;
   /** Starts the computer on first use and copies the turn's files before each tool. */
   get: (reason: "tool" | "takeover" | "script", tool?: string) => Promise<ComputerRef>;
-  /** Queue files from earlier messages; `get` copies them before the next computer tool. */
+  /**
+   * Earlier messages are not copied onto the computer. The callback stays so a caller
+   * cannot put a historical attachment into this turn's file set.
+   */
   copyEarlierFiles: (files: Array<Extract<MessageBlock, { kind: "file" | "image" }>>) => void;
+  /**
+   * `attachments/<file>` paths that belong to this turn. File tools hide every
+   * other attachment copy so a leftover image is not a new task.
+   */
+  turnAttachmentPaths: Set<string>;
   checkpoint: ReturnType<typeof createRunWorkspaceCheckpoint>;
   hostEnvironment: Awaited<ReturnType<NonNullable<SandboxProvider["environment"]>>> | undefined;
   graphical: boolean;

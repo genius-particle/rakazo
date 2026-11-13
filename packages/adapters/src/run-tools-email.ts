@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { BOT_EMAIL_NAME_TAKEN, BotEmailNameSchema } from "@rakazo/contracts";
-import { attachmentComputerPath, matchesSearchQuery, redactSecrets } from "@rakazo/core";
+import { matchesSearchQuery, redactSecrets } from "@rakazo/core";
 import { claimBotEmailName, contentEncryptionOf, reserveBotEmailSend } from "@rakazo/db";
 import { z } from "zod";
 import { redactConnectorPayload } from "./connector-safety.js";
@@ -87,21 +87,6 @@ async function readEmail(ctx: RunContext, call: ToolCall) {
     const body = redactSecrets(email.text, ctx.secrets);
     const text = body.slice(offset, offset + TEXT_PAGE_CHARS);
     const files = email.attachments as SavedFile[];
-    const kept = files.flatMap((file) =>
-      file.artifactId && file.mimeType
-        ? [
-            {
-              kind: "file" as const,
-              artifactId: file.artifactId,
-              name: file.name,
-              mimeType: file.mimeType,
-              size: file.size ?? 0,
-            },
-          ]
-        : [],
-    );
-    // Copied before the bot's next computer tool, where history tools put files too.
-    ctx.computer.copyEarlierFiles(kept);
     // A service can echo a password or code the bot holds as a secret.
     const shown = redactConnectorPayload(
       {
@@ -120,10 +105,7 @@ async function readEmail(ctx: RunContext, call: ToolCall) {
           ? {
               files: files.map((file) =>
                 file.artifactId && file.mimeType
-                  ? {
-                      name: file.name,
-                      path: attachmentComputerPath(file.artifactId, file.mimeType),
-                    }
+                  ? { name: file.name }
                   : { name: file.name, unavailable: true },
               ),
             }

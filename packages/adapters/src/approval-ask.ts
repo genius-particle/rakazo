@@ -163,6 +163,20 @@ export function buildApprovalAskBlock(
       ],
     };
   }
+  if (toolName === "user_computer_read") {
+    return {
+      kind: "ask",
+      approvalEffectId: effectId,
+      text: "Read a file on your computer?",
+      detail: truncate(redactSecrets(String(args.path ?? ""), secrets), MAX_APPROVAL_DETAIL_LENGTH),
+      detailFormat: "code",
+      status: "pending",
+      actions: [
+        { id: "allow", label: "Allow in this space" },
+        { id: "deny", label: "Deny" },
+      ],
+    };
+  }
   if (toolName === "user_computer_shell") {
     const cwd = typeof args.cwd === "string" && args.cwd.trim() ? `cd ${args.cwd.trim()}\n` : "";
     return {

@@ -1,6 +1,6 @@
 import { ATTACHMENT_MAX_BASE64_LENGTH } from "@rakazo/contracts";
 
-const IMAGE_MAX_EDGE = 2048;
+export const IMAGE_MAX_EDGE = 2048;
 const IMAGE_TILE_PIXELS = 512;
 const IMAGE_TOKENS_PER_TILE = 170;
 const IMAGE_BASE_TOKENS = 85;

@@ -21,6 +21,7 @@ const FIND_TOOL_LIMIT = 3;
 export const CORE_BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "shell",
   "user_computer_shell",
+  "user_computer_read",
   "read_file",
   "write_file",
   "list_files",
@@ -59,7 +60,7 @@ const FLEET_NAMES: ReadonlySet<string> = new Set(FLEET_TOOL_NAMES);
 
 const AREAS: Array<[area: string, matches: (name: string) => boolean]> = [
   ["secrets", (name) => name.includes("secret")],
-  ["bots", (name) => FLEET_NAMES.has(name) || name.endsWith("_bot")],
+  ["bots", (name) => FLEET_NAMES.has(name) || name.endsWith("_bot") || name.endsWith("_bots")],
   [
     "tasks",
     (name) =>
@@ -112,7 +113,7 @@ function bridgeTools(deferred: readonly ConnectorTool[]): ConnectorTool[] {
   return [
     {
       name: FIND_TOOL,
-      description: `Get the parameters of built-in tools not in your tool list, including ones your instructions name. Call this before use_tool. Pass names for exact tools or query to search.\n${formatNameIndexText(groupedNames(searchEntries(deferred)))}`,
+      description: `Get the parameters of built-in tools not in your tool list, including ones your instructions name. Call this before use_tool. Pass names for exact tools or query to search. Core built-ins (shell, read_file, write_file, user_computer_shell, user_computer_read, computer_observe, ask_user, message_user, remember) are always in your tool list and never appear in this index: missing from search does not mean missing from your tools, so call them directly.\n${formatNameIndexText(groupedNames(searchEntries(deferred)))}`,
       inputSchema: {
         type: "object",
         properties: {

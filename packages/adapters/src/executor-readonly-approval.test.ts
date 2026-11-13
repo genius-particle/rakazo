@@ -3421,7 +3421,9 @@ describe("user_computer_shell", () => {
     for (const trigger of ["user", "follow_up"]) {
       const f = fixture({ ...ownRun, trigger, userDevices: gateway });
       await f.run();
-      expect(f.offeredTools()).toContain("user_computer_shell");
+      expect(f.offeredTools()).toEqual(
+        expect.arrayContaining(["user_computer_shell", "user_computer_read"]),
+      );
       expect(f.instructions()).toContain(line);
       expect(f.instructions()).not.toContain(offlineLine);
     }
@@ -3440,8 +3442,18 @@ describe("user_computer_shell", () => {
     expect(f.instructions()).not.toContain(line);
   });
 
+  it("mentions an offline computer for an owner webhook run", async () => {
+    const f = fixture({
+      ...ownRun,
+      userDevices: devices(false, true).gateway,
+      trigger: "webhook",
+    });
+    await f.run();
+    expect(f.offeredTools()).not.toContain("user_computer_shell");
+    expect(f.instructions()).toContain(offlineLine);
+  });
+
   it.each<[string, Parameters<typeof fixture>[0]]>([
-    ["a webhook run", { userDevices: devices(false, true).gateway, trigger: "webhook" }],
     ["another member's bot", { userDevices: devices(false, true).gateway, botUserId: "user-2" }],
     [
       "a disabled tool",
@@ -3463,11 +3475,19 @@ describe("user_computer_shell", () => {
       "a disabled tool",
       { userDevices: devices().gateway, disabledBuiltinTools: ["user_computer_shell"] },
     ],
+    ["another member's bot", { userDevices: devices().gateway, botUserId: "user-2" }],
+  ])("is not offered for %s", async (_label, options) => {
+    const f = fixture({ ...ownRun, ...options });
+    await f.run();
+    expect(f.offeredTools()).not.toContain("user_computer_shell");
+    expect(f.instructions()).not.toContain(line);
+  });
+
+  it.each<[string, Parameters<typeof fixture>[0]]>([
     [
       "a bot's follow-up",
       { userDevices: devices().gateway, trigger: "follow_up", sourceRole: "bot" },
     ],
-    ["another member's bot", { userDevices: devices().gateway, botUserId: "user-2" }],
     ...[
       "webhook",
       "routine",
@@ -3481,16 +3501,31 @@ describe("user_computer_shell", () => {
       `a ${trigger} run`,
       { userDevices: devices().gateway, trigger },
     ]),
-  ])("is not offered for %s", async (_label, options) => {
+  ])("is offered for %s when the run user owns the bot", async (_label, options) => {
     const f = fixture({ ...ownRun, ...options });
     await f.run();
-    expect(f.offeredTools()).not.toContain("user_computer_shell");
-    expect(f.instructions()).not.toContain(line);
+    expect(f.offeredTools()).toEqual(
+      expect.arrayContaining(["user_computer_shell", "user_computer_read"]),
+    );
   });
 
-  it("refuses a call from a run that may not reach the device without an approval card", async () => {
+  it("runs an owner webhook on the computer without an approval card", async () => {
     const { gateway, requests } = devices();
     const f = fixture({ ...ownRun, trigger: "webhook", userDevices: gateway });
+    f.setCalls([call("ssh pi.local hostname")]);
+    await f.run();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(f.results).toEqual([{ stdout: "pi.local\n", stderr: "", code: 0 }]);
+    expect(requests.map(({ request }) => request.method)).toEqual([
+      "provision",
+      "environment",
+      "execute",
+    ]);
+  });
+
+  it("refuses another member's bot without an approval card", async () => {
+    const { gateway, requests } = devices();
+    const f = fixture({ ...ownRun, botUserId: "user-2", userDevices: gateway });
     f.setCalls([call("ssh pi.local hostname")]);
     await f.run();
     expect(f.results).toEqual([{ error: "The user's computer is not available in this run." }]);
@@ -3499,7 +3534,7 @@ describe("user_computer_shell", () => {
     expect(requests).toEqual([]);
   });
 
-  it("asks first, even in never-ask mode with an allow rule, then runs without asking again in this space", async () => {
+  it("runs on the owner's computer without an approval card", async () => {
     const { gateway, requests } = devices();
     const f = fixture({
       ...ownRun,
@@ -3509,27 +3544,7 @@ describe("user_computer_shell", () => {
     });
     f.setCalls([call("ssh pi.local hostname")]);
     await f.run();
-    expect(isApprovalPausedResult(f.results[0])).toBe(true);
-    expect(requests).toEqual([]);
-    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
-    expect(f.pauseRunForInput.mock.calls[0]).toEqual([
-      expect.objectContaining({
-        blocks: [
-          expect.objectContaining({
-            kind: "ask",
-            text: "Run on your computer?",
-            detail: "ssh pi.local hostname",
-            actions: [
-              { id: "allow", label: "Allow in this space" },
-              { id: "deny", label: "Deny" },
-            ],
-          }),
-        ],
-      }),
-    ]);
-
-    f.effects[0]!.status = "approved";
-    await f.run();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
     expect(f.results.at(-1)).toEqual({ stdout: "pi.local\n", stderr: "", code: 0 });
     expect(requests.map(({ userId, request }) => [userId, request.method])).toEqual([
       ["user-1", "provision"],
@@ -3544,34 +3559,20 @@ describe("user_computer_shell", () => {
 
     f.setCalls([call("ssh pi.local uptime", "call-2")]);
     await f.run();
-    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
-    // Any chat of this user in this space counts, not just this one.
-    expect(f.prisma.externalEffect.findFirst).toHaveBeenLastCalledWith({
-      where: {
-        spaceId: "space-1",
-        status: { in: ["approved", "executing", "completed", "uncertain"] },
-        createdAt: { gte: new Date(0) },
-        run: { userId: "user-1" },
-        kind: "user_computer_shell",
-      },
-      select: { id: true },
-    });
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
     expect(f.results.at(-1)).toEqual({ stdout: "pi.local\n", stderr: "", code: 0 });
-    expect(f.effects.map((effect) => effect.status)).toEqual(["completed", "completed"]);
   });
 
-  it("asks again after the computer is removed and paired again", async () => {
+  it("keeps running after the computer is paired again", async () => {
     const { gateway } = devices();
     const f = fixture({ ...ownRun, userDevices: gateway });
     f.setCalls([call("hostname")]);
     await f.run();
-    f.effects[0]!.status = "approved";
-    await f.run();
     gateway.pairedSince.mockResolvedValue(new Date(Date.now() + 60_000));
     f.setCalls([call("uptime", "call-2")]);
     await f.run();
-    expect(f.pauseRunForInput).toHaveBeenCalledTimes(2);
-    expect(isApprovalPausedResult(f.results.at(-1))).toBe(true);
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(f.results.at(-1)).toEqual({ stdout: "pi.local\n", stderr: "", code: 0 });
   });
 
   it("refuses with a block rule", async () => {
@@ -3646,19 +3647,6 @@ describe("user computer screen control", () => {
     args: { app },
     executionId,
   });
-  const card = (app: string) =>
-    expect.objectContaining({
-      blocks: [
-        expect.objectContaining({
-          kind: "ask",
-          text: `Use ${app} on your computer?`,
-          actions: [
-            { id: "allow", label: "Allow in this space" },
-            { id: "deny", label: "Deny" },
-          ],
-        }),
-      ],
-    });
 
   it("is offered only with a connected Mac or Windows PC", async () => {
     for (const platform of ["darwin", "win32"]) {
@@ -3670,7 +3658,9 @@ describe("user computer screen control", () => {
     }
     const linux = fixture({ ...ownRun, userDevices: devices("linux").gateway });
     await linux.run();
-    expect(linux.offeredTools()).toContain("user_computer_shell");
+    expect(linux.offeredTools()).toEqual(
+      expect.arrayContaining(["user_computer_shell", "user_computer_read"]),
+    );
     expect(linux.offeredTools()).not.toContain("user_computer_observe");
     const disabled = fixture({
       ...ownRun,
@@ -3681,7 +3671,7 @@ describe("user computer screen control", () => {
     expect(disabled.offeredTools()).not.toContain("user_computer_act");
   });
 
-  it("asks per app, then uses an allowed app across this space", async () => {
+  it("uses an app without an approval card", async () => {
     const { gateway, requests } = devices();
     const f = fixture({
       ...ownRun,
@@ -3691,12 +3681,7 @@ describe("user computer screen control", () => {
     });
     f.setCalls([observe("TextEdit")]);
     await f.run();
-    expect(isApprovalPausedResult(f.results[0])).toBe(true);
-    expect(f.pauseRunForInput.mock.calls[0]).toEqual([card("TextEdit")]);
-    expect(requests).toEqual([]);
-
-    f.effects[0]!.status = "approved";
-    await f.run();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
     expect(requests).toEqual([
       { method: "screenObserve", app: "TextEdit", botId: "bot-1", runId: "run-1" },
     ]);
@@ -3713,7 +3698,7 @@ describe("user computer screen control", () => {
       },
     ]);
     await f.run();
-    expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
     expect(requests.at(-1)).toMatchObject({
       method: "screenAct",
       app: "textedit",
@@ -3725,8 +3710,8 @@ describe("user computer screen control", () => {
 
     f.setCalls([observe("Mail", "call-3")]);
     await f.run();
-    expect(f.pauseRunForInput).toHaveBeenCalledTimes(2);
-    expect(f.pauseRunForInput.mock.calls[1]).toEqual([card("Mail")]);
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(requests.at(-1)).toMatchObject({ method: "screenObserve", app: "Mail" });
   });
 
   it("refuses malformed actions before reaching the computer", async () => {

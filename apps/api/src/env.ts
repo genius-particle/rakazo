@@ -158,6 +158,13 @@ export interface AppEnv {
   photonWebhookSecret: string | undefined;
   /** Extra named Photon projects (PHOTON_PROJECT_ID_<NAME>), each with its own number. */
   photonProjects?: PhotonProjectCredentials[];
+  /** Advisor channel (grokbot): URL + two bearers required together to mount. */
+  grokbotOutboundUrl: string | undefined;
+  grokbotOutboundToken: string | undefined;
+  grokbotInboundToken: string | undefined;
+  grokbotAddress: string | undefined;
+  grokbotPeerAddress: string | undefined;
+  grokbotPeerLabel: string | undefined;
   /** Unknown chat senders auto-provision their own accounts when true. */
   messagingOpenSignup: boolean;
   /** Bot that owns team/external chat rooms on the messaging surface. */
@@ -343,6 +350,12 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     photonProjectSecret: optional(source.PHOTON_PROJECT_SECRET),
     photonWebhookSecret: optional(source.PHOTON_WEBHOOK_SECRET),
     photonProjects: photonProjectsFromEnv(source),
+    grokbotOutboundUrl: optional(source.MESSAGING_GROKBOT_OUTBOUND_URL),
+    grokbotOutboundToken: optional(source.MESSAGING_GROKBOT_OUTBOUND_TOKEN),
+    grokbotInboundToken: optional(source.MESSAGING_GROKBOT_INBOUND_TOKEN),
+    grokbotAddress: optional(source.MESSAGING_GROKBOT_ADDRESS),
+    grokbotPeerAddress: optional(source.MESSAGING_GROKBOT_PEER_ADDRESS),
+    grokbotPeerLabel: optional(source.MESSAGING_GROKBOT_PEER_LABEL),
     messagingOpenSignup: source.MESSAGING_OPEN_SIGNUP === "true",
     teamChatBotId: optional(source.TEAM_CHAT_BOT_ID) ?? optional(source.SLACK_RAKAZO_BOT_ID),
     teamChatJudgeProvider: optional(source.TEAM_CHAT_JUDGE_PROVIDER),

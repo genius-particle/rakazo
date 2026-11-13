@@ -47,8 +47,17 @@ describe("home save exclusions", () => {
     "project/Cache/data",
     "project/lock",
     "project/WidevineCdm/notes.txt",
+    "notes/plan.md",
+    "charts/plot.png",
   ])("keeps %s", (name) => {
     expect(shouldSkipPortableWorkspaceFile(name)).toBe(false);
+  });
+
+  it("leaves chat attachment copies out of the home snapshot", () => {
+    expect(shouldSkipPortableWorkspaceFile("attachments/old.png")).toBe(true);
+    expect(shouldSkipPortableWorkspaceFile("bots/bot-1/attachments/old.png")).toBe(true);
+    expect(shouldSkipPortableWorkspaceFile("notes/plan.md")).toBe(false);
+    expect(shouldSkipPortableWorkspaceFile("charts/plot.png")).toBe(false);
   });
 
   it("retains the existing browser profile name matching", () => {
@@ -109,6 +118,8 @@ describe.skipIf(findVersion.status !== 0 || !findVersion.stdout.includes("GNU"))
           "nested/debug.log",
           "nested/core.123",
           ".browser-profiles/chromium/SingletonLock",
+          "attachments/old.png",
+          "bots/bot-1/attachments/old.png",
         ];
         for (const name of [...kept, ...excluded]) {
           const target = path.join(home, name);

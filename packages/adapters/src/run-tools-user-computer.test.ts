@@ -1,11 +1,15 @@
+import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 import type { HostComputerRequest } from "./host-computer-protocol.js";
 import type { RunContext } from "./run-context.js";
 import type { ToolCall } from "./run-tool-gate.js";
 import {
+  readUserComputerFileArgv,
   userComputerCwd,
+  userComputerFilePath,
   userComputerGate,
   userComputerOwner,
+  userComputerRead,
   userComputerShell,
 } from "./run-tools-user-computer.js";
 import type { UserDeviceGateway } from "./user-device-protocol.js";
@@ -54,15 +58,8 @@ function setup(execute: (signal: AbortSignal) => AsyncIterable<unknown>, secrets
 }
 
 describe("userComputerGate", () => {
-  it("finds an app approved before hundreds of later screen actions", async () => {
-    const effects = [
-      ...Array.from({ length: 450 }, (_, index) => ({ id: `e${450 - index}`, app: "TextEdit" })),
-      { id: "e0", app: "Mail" },
-    ].map(({ id, app }) => ({ id, request: { app } }));
-    const findMany = vi.fn(async ({ take, cursor }: { take: number; cursor?: { id: string } }) => {
-      const start = cursor ? effects.findIndex((effect) => effect.id === cursor.id) + 1 : 0;
-      return effects.slice(start, start + take);
-    });
+  it("allows the user's computer unless the call is blocked", async () => {
+    const findMany = vi.fn();
     const ctx = {
       deps: {
         userDevices: { pairedSince: async () => new Date(0) },
@@ -73,10 +70,13 @@ describe("userComputerGate", () => {
     await expect(
       userComputerGate(ctx, false, "user_computer_observe", { app: "mail" }),
     ).resolves.toBe("allow");
-    expect(findMany).toHaveBeenCalledTimes(3);
     await expect(
-      userComputerGate(ctx, false, "user_computer_observe", { app: "Notes" }),
-    ).resolves.toBe("ask");
+      userComputerGate(ctx, false, "user_computer_read", { path: "Pictures/shot.png" }),
+    ).resolves.toBe("allow");
+    expect(findMany).not.toHaveBeenCalled();
+    await expect(
+      userComputerGate(ctx, true, "user_computer_read", { path: "Pictures/shot.png" }),
+    ).resolves.toBe("deny");
   });
 });
 
@@ -89,22 +89,24 @@ describe("userComputerOwner", () => {
     botUserId: "user-1",
   };
 
-  it("is the bot owner when their own message started the run", () => {
+  it("is the bot owner for any trigger when this run's user owns the bot", () => {
     expect(userComputerOwner(own)).toBe("user-1");
-    expect(userComputerOwner({ ...own, trigger: "follow_up" })).toBe("user-1");
+    for (const change of [
+      { trigger: "follow_up" },
+      { trigger: "routine" },
+      { trigger: "webhook" },
+      { trigger: "messaging" },
+      { trigger: "call_end" },
+      { sourceRole: "bot" as const },
+      { sourceRole: undefined },
+      { messagingChannelRun: true },
+    ]) {
+      expect(userComputerOwner({ ...own, ...change })).toBe("user-1");
+    }
   });
 
-  it.each([
-    { trigger: "routine" },
-    { trigger: "webhook" },
-    { trigger: "messaging" },
-    { trigger: "call_end" },
-    { sourceRole: "bot" },
-    { sourceRole: undefined },
-    { messagingChannelRun: true },
-    { runUserId: "user-2" },
-  ])("is nobody for %o", (change) => {
-    expect(userComputerOwner({ ...own, ...change })).toBeUndefined();
+  it("is nobody when the run user does not own the bot", () => {
+    expect(userComputerOwner({ ...own, runUserId: "user-2" })).toBeUndefined();
   });
 });
 
@@ -204,5 +206,97 @@ describe("userComputerShell", () => {
     controller.abort();
     await expect(pending).rejects.toThrow("aborted");
     expect(signals.every((signal) => signal.aborted)).toBe(true);
+  });
+});
+
+describe("userComputerFilePath", () => {
+  it("resolves paths inside the user's home and refuses escapes", () => {
+    expect(userComputerFilePath(environment, "Pictures/shot.png")).toBe(
+      "/Users/fake/Pictures/shot.png",
+    );
+    expect(userComputerFilePath(environment, "~/Pictures/shot.png")).toBe(
+      "/Users/fake/Pictures/shot.png",
+    );
+    expect(userComputerFilePath(environment, "/Users/fake/Pictures/shot.png")).toBe(
+      "/Users/fake/Pictures/shot.png",
+    );
+    expect(() => userComputerFilePath(environment, "/tmp/shot.png")).toThrow(
+      "inside the user's home folder",
+    );
+    expect(() => userComputerFilePath(environment, "../other.png")).toThrow(
+      "inside the user's home folder",
+    );
+    expect(() => userComputerFilePath(environment, "~")).toThrow("path must name a file");
+    expect(() => userComputerFilePath(environment, "")).toThrow("path must name a file");
+  });
+
+  it("uses Windows path rules when the desktop is Windows", () => {
+    const win = { platform: "win32", home: "C:\\Users\\fake", shell: "powershell.exe" };
+    expect(userComputerFilePath(win, "Pictures\\shot.png")).toBe(
+      "C:\\Users\\fake\\Pictures\\shot.png",
+    );
+    expect(userComputerFilePath(win, "C:\\Users\\fake\\Pictures\\shot.png")).toBe(
+      "C:\\Users\\fake\\Pictures\\shot.png",
+    );
+    expect(() => userComputerFilePath(win, "C:\\Windows\\shot.png")).toThrow(
+      "inside the user's home folder",
+    );
+  });
+});
+
+describe("userComputerRead", () => {
+  it("feeds a user-computer image to the model without opening a window", async () => {
+    const png = await sharp({
+      create: { width: 20, height: 10, channels: 3, background: "green" },
+    })
+      .png()
+      .toBuffer();
+    async function* execute() {
+      yield { type: "stdout", data: png.toString("base64") };
+      yield { type: "exit", code: 0 };
+    }
+    const { ctx, call, requests } = setup(execute);
+    (ctx as { computer: { acceptsImages: boolean } }).computer = { acceptsImages: true };
+    const result = await userComputerRead(ctx, call({ path: "Pictures/shot.png" }));
+    expect(result).toMatchObject({
+      kind: "agent_tool_result",
+      details: { path: "Pictures/shot.png", width: 20, height: 10, mimeType: "image/png" },
+    });
+    const executed = requests.find((request) => request.method === "execute");
+    expect(executed?.method).toBe("execute");
+    if (executed && executed.method === "execute") {
+      expect(executed.command.argv).toEqual(readUserComputerFileArgv("darwin"));
+      expect(executed.command.env).toMatchObject({
+        RAKAZO_READ_PATH: "/Users/fake/Pictures/shot.png",
+      });
+      expect(executed.command.argv.join(" ")).not.toContain("shot.png");
+    }
+  });
+
+  it("refuses a path outside the user's home without running a command", async () => {
+    const { ctx, call, requests } = setup(async function* () {
+      yield { type: "exit", code: 0 };
+    });
+    (ctx as { computer: { acceptsImages: boolean } }).computer = { acceptsImages: true };
+    const result = await userComputerRead(ctx, call({ path: "/tmp/secret.png" }));
+    expect(result).toMatchObject({
+      error: "path must be inside the user's home folder",
+      path: "/tmp/secret.png",
+    });
+    expect(requests.some((request) => request.method === "execute")).toBe(false);
+  });
+
+  it("says when a non-image file is not UTF-8 text", async () => {
+    async function* execute() {
+      yield { type: "stdout", data: Buffer.from([0xff, 0xfe, 0xfd]).toString("base64") };
+      yield { type: "exit", code: 0 };
+    }
+    const { ctx, call } = setup(execute);
+    (ctx as { computer: { acceptsImages: boolean } }).computer = { acceptsImages: true };
+    const result = await userComputerRead(ctx, call({ path: "notes/blob.bin" }));
+    expect(result).toEqual({
+      error: "file is not UTF-8 text and is not a png, jpeg, gif, or webp image",
+      path: "notes/blob.bin",
+    });
   });
 });

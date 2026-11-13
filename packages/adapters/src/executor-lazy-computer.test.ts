@@ -253,6 +253,9 @@ async function runRoutine(
         })
       : undefined,
     listFiles: vi.fn(async () => [{ path: "notes.txt", kind: "file", size: 4 }]),
+    execute: vi.fn(async function* () {
+      yield { type: "exit" as const, code: 0 };
+    }),
     writeFile: vi.fn(async () => undefined),
     releaseScreen: vi.fn(async () => undefined),
     exportWorkspace: vi.fn(async function* () {

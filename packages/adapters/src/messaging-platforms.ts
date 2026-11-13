@@ -20,6 +20,8 @@ import type { SendblueAdapterConfig, SendblueThreadId } from "chat-adapter-sendb
 import type { ClientOptions as SendblueClientOptions } from "sendblue";
 import type { MessagingPlatform } from "./chat-sdk-surface.js";
 import { boundInboundMarkdown } from "./chat-sdk-surface.js";
+import { encodeGrokbotThreadId, GrokbotAdapter } from "./grokbot/adapter.js";
+import type { GrokbotAskStore } from "./grokbot/ask-store.js";
 import { LazyLarkAdapter } from "./lark/lazy-adapter.js";
 import { Domain } from "./lark/thread-id.js";
 import { lazyChatAdapter } from "./lazy-chat-adapter.js";
@@ -57,6 +59,16 @@ export interface MessagingEnvironmentValues {
   photonWebhookSecret?: string | undefined;
   /** Extra named Photon projects (PHOTON_PROJECT_ID_<NAME>), each with its own number. */
   photonProjects?: PhotonProjectCredentials[] | undefined;
+  /**
+   * Advisor channel (grokbot): the advisor's webhook URL plus the two bearers
+   * mount the platform; all three are required together.
+   */
+  grokbotOutboundUrl?: string | undefined;
+  grokbotOutboundToken?: string | undefined;
+  grokbotInboundToken?: string | undefined;
+  grokbotAddress?: string | undefined;
+  grokbotPeerAddress?: string | undefined;
+  grokbotPeerLabel?: string | undefined;
 }
 
 export function messagingEnvFromProcess(
@@ -89,6 +101,12 @@ export function messagingEnvFromProcess(
     photonProjectSecret: clean(env.PHOTON_PROJECT_SECRET),
     photonWebhookSecret: clean(env.PHOTON_WEBHOOK_SECRET),
     photonProjects: photonProjectsFromEnv(env),
+    grokbotOutboundUrl: clean(env.MESSAGING_GROKBOT_OUTBOUND_URL),
+    grokbotOutboundToken: clean(env.MESSAGING_GROKBOT_OUTBOUND_TOKEN),
+    grokbotInboundToken: clean(env.MESSAGING_GROKBOT_INBOUND_TOKEN),
+    grokbotAddress: clean(env.MESSAGING_GROKBOT_ADDRESS),
+    grokbotPeerAddress: clean(env.MESSAGING_GROKBOT_PEER_ADDRESS),
+    grokbotPeerLabel: clean(env.MESSAGING_GROKBOT_PEER_LABEL),
   };
 }
 
@@ -178,6 +196,8 @@ export function messagingPlatformsFromEnv(
     sendblueTransport?: Pick<SendblueClientOptions, "baseURL" | "fetch">;
     /** Test seam: replace only the official Lark SDK HTTP boundary. */
     larkTransport?: HttpInstance;
+    /** Resolves advisor replies for pending ask_grokbot calls (API process only). */
+    grokbotAskStore?: GrokbotAskStore;
   } = {},
 ): MessagingPlatform[] {
   const platforms: MessagingPlatform[] = [];
@@ -392,6 +412,36 @@ export function messagingPlatformsFromEnv(
         pollInboundMessages: options.pollInboundMessages ?? false,
       }),
     });
+  }
+
+  // The advisor channel (grokbot): all three credentials required together, so a
+  // half-configured deployment neither mounts the webhook nor sends anywhere.
+  if (env.grokbotOutboundUrl && env.grokbotOutboundToken && env.grokbotInboundToken) {
+    let outboundUrl: URL | undefined;
+    try {
+      outboundUrl = new URL(env.grokbotOutboundUrl);
+    } catch {
+      getLogger().error("ignoring MESSAGING_GROKBOT_OUTBOUND_URL: not a valid URL");
+    }
+    if (outboundUrl && (outboundUrl.protocol === "https:" || outboundUrl.protocol === "http:")) {
+      const address = env.grokbotAddress || "rakazo";
+      const peerAddress = env.grokbotPeerAddress || "dawa";
+      platforms.push({
+        provider: "grokbot",
+        capabilities: { direct: true, groups: false, receipt: null },
+        adapter: new GrokbotAdapter({
+          outboundUrl: outboundUrl.href,
+          outboundToken: env.grokbotOutboundToken,
+          inboundToken: env.grokbotInboundToken,
+          address,
+          peerAddress,
+          peerLabel: env.grokbotPeerLabel || "大娃",
+          ...(options.grokbotAskStore ? { askStore: options.grokbotAskStore } : {}),
+        }),
+        address,
+        directThreadId: (peer) => encodeGrokbotThreadId({ peer }),
+      });
+    }
   }
 
   return platforms;

@@ -61,6 +61,9 @@ describe("describeToolActivity", () => {
     expect(describeToolActivity("read_file", { path: "notes/plan.md" })).toBe(
       "Reading notes/plan.md",
     );
+    expect(describeToolActivity("user_computer_read", { path: "Pictures/shot.png" })).toBe(
+      "Reading Pictures/shot.png on your computer",
+    );
     expect(describeToolActivity("write_file", { path: "out.csv", content: "…" })).toBe(
       "Writing out.csv",
     );

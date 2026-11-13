@@ -267,6 +267,25 @@ export function inboundDeliveryClientNonce(
  * Answers an authenticated delivery. A Space being deleted takes none: the sender gets a 409, not
  * a server error, so the request is not reported as a failure.
  */
+
+/** Short chat stub for webhook/github; full JSON stays in the model prompt only. */
+export function visibleInboundChatStub(
+  source: InboundSource,
+  routines: Array<{ name: string }>,
+  prompt: string,
+): string {
+  const match = /^\[Inbound Event: ([^\]]+)\]/.exec(prompt);
+  const event = match?.[1] ?? (source === "github" ? "github" : "webhook");
+  const lines = [`[Inbound Event: ${event}]`];
+  if (routines.length > 0) {
+    lines.push(`Routines: ${routines.map((routine) => routine.name).join(", ")}`);
+  }
+  lines.push(
+    "Payload hidden from chat; full untrusted delivery data is in the model context only.",
+  );
+  return lines.join("\n");
+}
+
 export async function webhookDeliveryResponse(
   c: Context,
   delivery: ReturnType<typeof deliverWebhookEvent>,
@@ -315,6 +334,13 @@ export async function deliverWebhookEvent(
         ].join("\n")
       : input.prompt;
 
+  // Chat UI shows `blocks`; the model uses `prompt`. Keep full payload in prompt only for
+  // webhook/github so the main thread is not flooded with JSON the user already forwarded.
+  const hidePayloadInChat = input.source === "webhook" || input.source === "github";
+  const chatText = hidePayloadInChat
+    ? visibleInboundChatStub(input.source, input.routines, input.prompt)
+    : promptText;
+
   const clientNonce = input.idempotencyKey
     ? inboundDeliveryClientNonce(input.source, target.bot.id, input.idempotencyKey)
     : undefined;
@@ -326,7 +352,7 @@ export async function deliverWebhookEvent(
     botId: target.bot.id,
     userId: target.bot.userId,
     blocks: [
-      { kind: "text", text: promptText },
+      { kind: "text", text: chatText },
       ...(input.artifacts ?? []).map(messageBlockForArtifact),
     ],
     prompt: promptText,

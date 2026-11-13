@@ -171,7 +171,9 @@ export function secureHttpOrigin(value: string | undefined): string | null {
   if (!value) return null;
   try {
     const url = new URL(value);
-    return url.protocol === "https:" || (url.protocol === "http:" && isLoopbackHost(url.hostname))
+    return url.protocol === "https:" ||
+      (url.protocol === "http:" &&
+        (isLoopbackHost(url.hostname) || isPrivateNetworkHost(url.hostname)))
       ? url.origin
       : null;
   } catch {

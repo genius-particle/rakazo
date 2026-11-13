@@ -77,7 +77,10 @@ import {
   resolveComputerRunModel,
 } from "./computer-model-settings.js";
 import { teamWorkspaceInstruction } from "./computer-support.js";
-import { checkpointRunComputerWorkspace } from "./computer-workspace.js";
+import {
+  checkpointRunComputerWorkspace,
+  removeStaleWorkspaceAttachments,
+} from "./computer-workspace.js";
 import {
   connectedContext,
   loadLivePluginSlugs,
@@ -192,7 +195,6 @@ import {
   claimRunSteering,
   loadCurrentTurnImages,
   missingTurnImagesInstruction,
-  RECENT_TURN_IMAGE_TURNS,
   withRecentTurnImages,
 } from "./run-turn-images.js";
 import { loadAgentScratchpadContext } from "./scratchpad-context.js";
@@ -211,14 +213,9 @@ import {
 import { TASK_CATALOG_GUIDANCE } from "./task-catalog.js";
 import { parsePlaybook } from "./teaching-session.js";
 import {
-  createEarlierFileQueue,
   currentTurnFilesInstruction,
   listCurrentTurnFiles,
-  listRecentThreadFiles,
   materializeCurrentTurnFiles,
-  materializeEarlierFiles,
-  materializeRecentThreadFiles,
-  recentThreadFilesInstruction,
 } from "./thread-artifacts.js";
 import { loadAgentTicketContext } from "./ticket-context.js";
 import { appendToolCompletionAudit, toolCompletionOutcome } from "./tool-completion-audit.js";
@@ -1000,30 +997,16 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
         const storedComputer = bot.computer;
         const computerMode = parseComputerMode(storedComputer.scope);
         const artifacts = deps.artifacts;
-        const recentFilesInput = {
-          context,
-          computerMode,
-          skipMessageId: currentTurnMessage?.id,
-          maxTurns: RECENT_TURN_IMAGE_TURNS,
-        };
-        // Files from earlier messages that history tools surfaced this run.
-        const earlierFiles = createEarlierFileQueue();
+        const turnAttachmentPaths = new Set<string>();
         const runComputer = lazyRunComputer(
           async () => {
             getLogger().info("computer.requested");
             const computer = await provisionComputer(deps, storedComputer.id, context, "bot");
-            earlierFiles.computerStarted();
             computerUse.screenRelease = { computer, context, keepWarm: false };
             recordComputerDisk(deps, storedComputer.id, computer, context);
             scheduleComputerSleep(deps.jobs, storedComputer.id);
-            // Earlier attachments wait for the computer's first use; every start copies them
-            // again, so they need no checkpoint, and each copy logs and skips its own failure.
-            if (artifacts) {
-              await materializeRecentThreadFiles({ ...deps, artifacts }, history, historyMessages, {
-                ...recentFilesInput,
-                computer: async () => computer,
-              });
-            }
+            // Do not recopy earlier turns onto the computer. Those files used to
+            // accumulate under attachments/ and a later turn would list them as new work.
             return computer;
           },
           () => runAbortController?.abort(),
@@ -1059,6 +1042,14 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
               copyingTurnFiles = copyingTurnFiles
                 .catch(() => undefined)
                 .then(async () => {
+                  // Drop leftover attachment copies before this turn's files are written,
+                  // so shell and every other reader only see paths registered for this turn.
+                  await removeStaleWorkspaceAttachments(deps.sandbox, computer, {
+                    mode: computerMode,
+                    botId: bot.id,
+                    allowed: turnAttachmentPaths,
+                    context,
+                  });
                   while (artifacts && pendingTurnFiles.length) {
                     const files = await materializeCurrentTurnFiles(
                       { ...deps, artifacts },
@@ -1070,21 +1061,9 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                         markWorkspaceDirty: workspaceCheckpoint.markDirty,
                       },
                     );
+                    for (const file of files) turnAttachmentPaths.add(file.path);
                     workspaceCheckpoint.markFiles(files);
                     pendingTurnFiles.shift();
-                  }
-                  const earlier = earlierFiles.take();
-                  if (artifacts && earlier.length) {
-                    earlierFiles.copiedTo(
-                      earlier,
-                      // Saved with the run's checkpoint, so a resumed attempt still has them.
-                      await materializeEarlierFiles({ ...deps, artifacts }, earlier, {
-                        context,
-                        computer: async () => computer,
-                        computerMode,
-                        markWorkspaceDirty: workspaceCheckpoint.markDirty,
-                      }),
-                    );
                   }
                 });
               await copyingTurnFiles;
@@ -1093,27 +1072,16 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           );
         };
         let currentTurnFiles: Awaited<ReturnType<typeof listCurrentTurnFiles>> = [];
-        let recentThreadFiles: Awaited<ReturnType<typeof listRecentThreadFiles>> = [];
         try {
           if (artifacts) {
             currentTurnFiles = await listCurrentTurnFiles(deps, turnBlocks, context);
-            recentThreadFiles = await listRecentThreadFiles(
-              deps,
-              history,
-              historyMessages,
-              recentFilesInput,
-            );
+            for (const file of currentTurnFiles) turnAttachmentPaths.add(file.path);
           }
         } catch (error) {
           await workspaceCheckpoint.flush().catch(() => undefined);
           throw error;
         }
-        const attachedFilesPrompt = [
-          currentTurnFilesInstruction(currentTurnFiles),
-          recentThreadFilesInstruction(recentThreadFiles),
-        ]
-          .filter(Boolean)
-          .join("\n\n");
+        const attachedFilesPrompt = currentTurnFilesInstruction(currentTurnFiles);
         const graphical =
           computerKind !== "desktop" && deps.sandbox.describe().capabilities.graphical;
         // Gate on the pair written to the run row above; re-deriving it would drop the
@@ -1480,7 +1448,8 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             lease: computerLease,
             lazy: runComputer,
             get: getRunComputer,
-            copyEarlierFiles: earlierFiles.add,
+            copyEarlierFiles: () => {},
+            turnAttachmentPaths,
             checkpoint: workspaceCheckpoint,
             hostEnvironment,
             graphical,
@@ -1639,12 +1608,17 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             : Math.max(0, resolved.maxImagesPerPrompt - (currentTurnImages?.length ?? 0));
         // A text-only model keeps the [image:] marker. Putting image parts in
         // history makes the provider reject a follow-up that used to be text.
-        const historyWithImages = modelSeesImages
-          ? await withRecentTurnImages(deps, history, historyMessages, context, {
-              skipMessageId: currentTurnMessage?.id,
-              maxImages: modelImageBudget,
-            })
-          : history;
+        // Only rehydrate nearby history images when THIS turn actually attached one.
+        // Pure-text follow-ups used to still pull screenshots from the last 1-2 user
+        // turns (and earlier, any of the last 3 image-bearing turns), which made bots
+        // treat old pictures as if they just arrived.
+        const historyWithImages =
+          modelSeesImages && (currentTurnImages?.length ?? 0) > 0
+            ? await withRecentTurnImages(deps, history, historyMessages, context, {
+                skipMessageId: currentTurnMessage?.id,
+                maxImages: modelImageBudget,
+              })
+            : history;
         const runtimeHistory = [...historicalContext, ...historyWithImages];
         // Without a roster a bot only knows the bots it spawned itself.
         const [teammates, groupDirectory] = await Promise.all([
@@ -1963,7 +1937,31 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
                     messageId: currentTurnMessage?.id,
                     hasImages: Boolean(currentTurnImages?.length),
                   },
+                  turnAttachmentPaths,
                 ),
+              verifyDispatchChildRuns: async ({ botIds }) => {
+                const ids = [
+                  ...new Set(botIds.filter((id) => typeof id === "string" && id.trim())),
+                ];
+                if (!ids.length) return { missingBotIds: [] };
+                const parent = await deps.prisma.run.findUnique({
+                  where: { id: runId },
+                  select: { createdAt: true, startedAt: true, spaceId: true },
+                });
+                const since = parent?.startedAt ?? parent?.createdAt;
+                if (!since) return { missingBotIds: ids };
+                const found = await deps.prisma.run.findMany({
+                  where: {
+                    spaceId: parent.spaceId,
+                    botId: { in: ids },
+                    trigger: "bot_message",
+                    createdAt: { gte: since },
+                  },
+                  select: { botId: true },
+                });
+                const seen = new Set(found.map((row) => row.botId));
+                return { missingBotIds: ids.filter((id) => !seen.has(id)) };
+              },
             },
             {
               ...context,

@@ -16,6 +16,7 @@ import { startBackgroundHelper } from "./background-helpers.js";
 import { messageBot } from "./bot-messages.js";
 import { endCallFromTool, requestUserCall } from "./call-request.js";
 import { normalizeWorkspacePath, resolveBotWorkspacePath } from "./computer-support.js";
+import { createGrokbotAsk, failGrokbotAsk, waitGrokbotReply } from "./grokbot/ask-store.js";
 import { handoffToGroupBot } from "./group-handoff.js";
 import type { RunContext } from "./run-context.js";
 import {
@@ -42,6 +43,27 @@ const ZIP_HELPS = new Set(["file not found or unreadable", "unsupported attachme
 
 /** `recipientId` is the bot the files were prepared for; delivery must go to that same bot. */
 type SentFiles = { files: AttachmentBlock[]; sharedPaths: string[]; recipientId?: string };
+
+/** Bounds one advisor consultation: 5s minimum, 30 minutes maximum. */
+const ADVISOR_QUESTION_MAX = 20_000;
+const ADVISOR_TIMEOUT_MIN_MS = 5_000;
+const ADVISOR_TIMEOUT_MAX_MS = 1_800_000;
+const ADVISOR_TIMEOUT_DEFAULT_MS = 600_000;
+
+function advisorTimeoutMs(value: unknown): number {
+  const parsed = Number(value);
+  const fallbackRaw = Number(process.env.MESSAGING_GROKBOT_REPLY_TIMEOUT_MS ?? "");
+  const fallback =
+    Number.isFinite(fallbackRaw) && fallbackRaw > 0 ? fallbackRaw : ADVISOR_TIMEOUT_DEFAULT_MS;
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return Math.min(Math.max(fallback, ADVISOR_TIMEOUT_MIN_MS), ADVISOR_TIMEOUT_MAX_MS);
+  }
+  return Math.min(Math.max(parsed, ADVISOR_TIMEOUT_MIN_MS), ADVISOR_TIMEOUT_MAX_MS);
+}
+
+function advisorErrorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 /**
  * Files a bot passes by path to another bot. A recipient on the same computer reads them
@@ -196,6 +218,70 @@ function deliveredMessage(
   return { message: `${text.trim()}${list}` };
 }
 
+const RELAY_MAX_TARGETS = 20;
+
+type RelayTarget = { bot_id?: string; confirm_name?: string };
+
+/** Parse relay_to_bots targets from targets[] / confirm_names[] / bot_ids[]. */
+function parseRelayTargets(args: Record<string, unknown>): { error: string } | RelayTarget[] {
+  const out: RelayTarget[] = [];
+  const push = (bot_id?: string, confirm_name?: string) => {
+    const id = bot_id?.trim() || undefined;
+    const name = confirm_name?.trim() || undefined;
+    if (!id && !name) return { error: "each target needs bot_id or confirm_name" as const };
+    out.push({ bot_id: id, confirm_name: name });
+    return undefined;
+  };
+  const raw = args.targets;
+  if (Array.isArray(raw) && raw.length) {
+    for (const item of raw) {
+      if (typeof item === "string") {
+        const err = push(undefined, item);
+        if (err) return err;
+        continue;
+      }
+      if (!item || typeof item !== "object") {
+        return { error: "each target must be a string name or {bot_id?, confirm_name?}" };
+      }
+      const o = item as Record<string, unknown>;
+      const err = push(
+        o.bot_id != null ? String(o.bot_id) : undefined,
+        o.confirm_name != null
+          ? String(o.confirm_name)
+          : o.name != null
+            ? String(o.name)
+            : undefined,
+      );
+      if (err) return err;
+    }
+  }
+  const names = args.confirm_names;
+  if (Array.isArray(names)) {
+    for (const n of names) {
+      if (typeof n !== "string" || !n.trim()) {
+        return { error: "confirm_names must be a list of non-empty strings" };
+      }
+      out.push({ confirm_name: n.trim() });
+    }
+  }
+  const ids = args.bot_ids;
+  if (Array.isArray(ids)) {
+    for (const id of ids) {
+      if (typeof id !== "string" || !id.trim()) {
+        return { error: "bot_ids must be a list of non-empty strings" };
+      }
+      out.push({ bot_id: id.trim() });
+    }
+  }
+  if (!out.length) {
+    return { error: "targets, confirm_names, or bot_ids is required" };
+  }
+  if (out.length > RELAY_MAX_TARGETS) {
+    return { error: `at most ${RELAY_MAX_TARGETS} targets per relay` };
+  }
+  return out;
+}
+
 /** Messages to the user, other bots and connected agents, and calls. */
 export const messagingTools: ToolHandlers = {
   async call_user(ctx, call) {
@@ -300,6 +386,53 @@ export const messagingTools: ToolHandlers = {
           }
         : { ok: true },
     );
+  },
+  async ask_grokbot(ctx, call) {
+    const { deps, run, bot, context } = ctx;
+    const { args, effectKey } = call;
+    const question = redactSecrets(String(args.question ?? "").trim(), ctx.secrets);
+    if (!question) return call.finish({ error: "question is required" });
+    if (!deps.sendToMessagingThread || !deps.advisorThreadId) {
+      return call.finish({ error: "The advisor channel is not configured on this deployment." });
+    }
+    const timeoutMs = advisorTimeoutMs(args.timeout_ms);
+    const body =
+      question.length > ADVISOR_QUESTION_MAX
+        ? `${question.slice(0, ADVISOR_QUESTION_MAX)}…[truncated]`
+        : question;
+    let correlation: string;
+    try {
+      ({ correlation } = await createGrokbotAsk(deps.prisma, {
+        botId: bot.id,
+        runId: run.id,
+        question: body,
+        timeoutMs,
+      }));
+    } catch (error) {
+      return call.finish({ error: `advisor ask setup failed: ${advisorErrorText(error)}` });
+    }
+    try {
+      await deps.sendToMessagingThread(
+        {
+          threadId: deps.advisorThreadId,
+          body: `${correlation}\n${body}`,
+          idempotencyKey: effectKey ?? correlation,
+        },
+        context,
+      );
+    } catch (error) {
+      await failGrokbotAsk(deps.prisma, correlation).catch(() => undefined);
+      return call.finish({ error: `advisor send failed: ${advisorErrorText(error)}` });
+    }
+    const reply = await waitGrokbotReply(deps.prisma, correlation, { signal: context.signal });
+    if (reply === null) {
+      return call.finish({
+        ok: false,
+        correlation,
+        note: `No reply within ${Math.round(timeoutMs / 1000)}s. Continue without it or ask again later; do not keep the user waiting on this channel.`,
+      });
+    }
+    return call.finish({ ok: true, correlation, reply });
   },
   async message_bot(ctx, call) {
     const { deps, run, bot } = ctx;
@@ -410,5 +543,90 @@ export const messagingTools: ToolHandlers = {
     });
     if ("ok" in result && result.ok && thread.groupId) ctx.state.handedOff = true;
     return call.finish(result);
+  },
+  async relay_to_bots(ctx, call) {
+    const { deps, run, bot } = ctx;
+    const { args, effectKey } = call;
+    if (!String(args.message ?? "").trim()) {
+      return call.finish({ ok: false, error: "message is required" });
+    }
+    const parsed = parseRelayTargets(args as Record<string, unknown>);
+    if ("error" in parsed) return call.finish({ ok: false, error: parsed.error });
+    const message = redactSecrets(String(args.message), ctx.secrets).trim();
+    const intent = args.intent as "request" | "result" | "question" | "status" | "fyi" | undefined;
+
+    type RelayResult = {
+      botId?: string;
+      name?: string;
+      ok: boolean;
+      error?: string;
+      note?: string;
+      replayed?: boolean;
+    };
+    const results: RelayResult[] = [];
+    const seenIds = new Set<string>();
+
+    for (let i = 0; i < parsed.length; i += 1) {
+      const target = parsed[i]!;
+      const sent = await messageBot(
+        deps,
+        { ...run, sourceMessageId: run.sourceMessageId },
+        { id: bot.id, name: bot.name },
+        {
+          bot_id: target.bot_id,
+          confirm_name: target.confirm_name,
+          message,
+          intent,
+          // Per-target delivery key so a retry of the whole relay is idempotent per recipient.
+          deliveryKey: effectKey
+            ? `${effectKey}:${i}:${target.bot_id ?? target.confirm_name ?? i}`
+            : undefined,
+        },
+      );
+      if (!sent.ok) {
+        results.push({
+          botId: target.bot_id,
+          name: target.confirm_name,
+          ok: false,
+          error: sent.error,
+        });
+        continue;
+      }
+      if (seenIds.has(sent.botId)) {
+        results.push({
+          botId: sent.botId,
+          name: sent.name,
+          ok: true,
+          note: `Duplicate of ${sent.name}; already counted in this relay.`,
+          replayed: true,
+        });
+        continue;
+      }
+      seenIds.add(sent.botId);
+      results.push({
+        botId: sent.botId,
+        name: sent.name,
+        ok: true,
+        note: sent.note,
+        replayed: "replayed" in sent ? sent.replayed : undefined,
+      });
+    }
+
+    const succeeded = results.filter((r) => r.ok);
+    const failed = results.filter((r) => !r.ok);
+    if (failed.length) {
+      return call.finish({
+        ok: false,
+        error: `relay incomplete: ${succeeded.length} ok, ${failed.length} failed`,
+        results,
+        succeeded: succeeded.map((r) => ({ botId: r.botId, name: r.name })),
+        failed: failed.map((r) => ({ botId: r.botId, name: r.name, error: r.error })),
+      });
+    }
+    return call.finish({
+      ok: true,
+      delivered: succeeded.length,
+      results,
+    });
   },
 };

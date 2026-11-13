@@ -2731,3 +2731,22 @@ model CapabilityInstallSpace {
   @@index([spaceId, userId])
   @@map("capability_install_spaces")
 }
+
+
+/// One ask_grokbot consultation awaiting the advisor's webhook reply. Rows are
+/// operational scratch (pending → answered/expired/failed); safe to truncate.
+model GrokbotAsk {
+  id          String    @id @default(cuid())
+  correlation String    @unique
+  botId       String
+  runId       String
+  question    String
+  reply       String?
+  status      String    @default("pending")
+  createdAt   DateTime  @default(now())
+  answeredAt  DateTime?
+  expiresAt   DateTime
+
+  @@index([status, expiresAt])
+  @@map("grokbot_asks")
+}

@@ -1,9 +1,12 @@
 import type { AdapterContext, ComputerRef, SandboxProvider } from "@rakazo/adapter-kit";
 import { redactSecrets } from "@rakazo/core";
-import { describe, expect, it } from "vitest";
+import sharp from "sharp";
+import { describe, expect, it, vi } from "vitest";
+import { MODEL_CANNOT_SEE_MESSAGE } from "./model-vision.js";
 import { TOOL_RESULT_TEXT_LIMIT } from "./pi-runtime-limits.js";
+import { STALE_TURN_ATTACHMENT_ERROR } from "./turn-attachment-gate.js";
 import type { RunWorkspace } from "./workspace-file-tools.js";
-import { readFileFromTool } from "./workspace-file-tools.js";
+import { listFilesFromTool, readFileFromTool } from "./workspace-file-tools.js";
 
 function fileWorkspace(content: string, runSecrets: string[] = []) {
   const bytes = new TextEncoder().encode(content);
@@ -208,5 +211,148 @@ describe("readFileFromTool ranges", () => {
     })) as ReadFileResult;
     expect(result.error).toContain("past the end");
     expect(result.totalLines).toBe(3);
+  });
+});
+
+describe("readFileFromTool images", () => {
+  async function pngWorkspace(width: number, height: number) {
+    const bytes = await sharp({
+      create: { width, height, channels: 3, background: { r: 10, g: 20, b: 30 } },
+    })
+      .png()
+      .toBuffer();
+    const computer = {
+      id: "computer-1",
+      botId: "bot-1",
+      kind: "fake",
+      providerRef: "test-sandbox",
+    };
+    const sandbox = { readFile: async () => bytes } as never;
+    const workspace = {
+      botId: "bot-1",
+      computerMode: "dedicated",
+      computer: async () => computer,
+      markDirty: () => {},
+      context: {} as never,
+      runSecrets: [],
+    };
+    return { sandbox, workspace };
+  }
+
+  it("returns visible image content for a png in the workspace", async () => {
+    const { sandbox, workspace } = await pngWorkspace(64, 48);
+    const result = await readFileFromTool(
+      sandbox,
+      workspace,
+      { path: "charts/plot.png" },
+      { acceptsImages: true },
+    );
+    expect(result).toMatchObject({
+      kind: "agent_tool_result",
+      details: { path: "charts/plot.png", width: 64, height: 48, mimeType: "image/png" },
+    });
+  });
+
+  it("fails clearly when the model cannot see a workspace image", async () => {
+    const { sandbox, workspace } = await pngWorkspace(16, 16);
+    await expect(
+      readFileFromTool(sandbox, workspace, { path: "charts/plot.png" }, { acceptsImages: false }),
+    ).resolves.toEqual({ error: MODEL_CANNOT_SEE_MESSAGE, path: "charts/plot.png" });
+  });
+
+  it("does not feed an earlier attachment image, and still feeds one from this turn", async () => {
+    const bytes = await sharp({
+      create: { width: 8, height: 8, channels: 3, background: { r: 1, g: 2, b: 3 } },
+    })
+      .png()
+      .toBuffer();
+    const readFile = vi.fn(async () => bytes);
+    const sandbox = { readFile } as never;
+    const workspace: RunWorkspace = {
+      botId: "bot-1",
+      computerMode: "dedicated",
+      computer: async () => ({
+        id: "computer-1",
+        botId: "bot-1",
+        kind: "fake",
+        providerRef: "test-sandbox",
+      }),
+      markDirty: () => {},
+      context: {} as AdapterContext,
+      runSecrets: [],
+      turnAttachmentPaths: new Set(["attachments/new.png"]),
+    };
+
+    const stale = await readFileFromTool(
+      sandbox,
+      workspace,
+      { path: "attachments/old.png" },
+      { acceptsImages: true },
+    );
+    expect(stale).toEqual({
+      error: STALE_TURN_ATTACHMENT_ERROR,
+      path: "attachments/old.png",
+    });
+    expect(readFile).not.toHaveBeenCalled();
+    expect(JSON.stringify(stale)).not.toContain("image");
+
+    const current = await readFileFromTool(
+      sandbox,
+      workspace,
+      { path: "attachments/new.png" },
+      { acceptsImages: true },
+    );
+    expect(current).toMatchObject({
+      kind: "agent_tool_result",
+      details: { path: "attachments/new.png", mimeType: "image/png" },
+    });
+    expect(readFile).toHaveBeenCalledOnce();
+  });
+});
+
+describe("listFilesFromTool attachments", () => {
+  it("does not list earlier attachment copies as new files", async () => {
+    const sandbox = {
+      listFiles: async () => [
+        { path: "notes/plan.md", kind: "file" as const, size: 3 },
+        { path: "attachments", kind: "dir" as const, size: 0 },
+        { path: "attachments/old.png", kind: "file" as const, size: 9 },
+        { path: "attachments/new.png", kind: "file" as const, size: 4 },
+        { path: "charts/plot.png", kind: "file" as const, size: 8 },
+      ],
+    } as unknown as SandboxProvider;
+    const workspace: RunWorkspace = {
+      botId: "bot-1",
+      computerMode: "dedicated",
+      computer: async () => ({
+        id: "computer-1",
+        botId: "bot-1",
+        kind: "fake",
+        providerRef: "test-sandbox",
+      }),
+      markDirty: () => {},
+      context: {} as AdapterContext,
+      runSecrets: [],
+      turnAttachmentPaths: new Set(["attachments/new.png"]),
+    };
+    const listed = await listFilesFromTool(sandbox, workspace, { path: "" });
+    expect(listed.entries.map((entry) => entry.path)).toEqual([
+      "notes/plan.md",
+      "attachments",
+      "attachments/new.png",
+      "charts/plot.png",
+    ]);
+
+    const inside = await listFilesFromTool(
+      {
+        listFiles: async () => [
+          { path: "old.png", kind: "file" as const, size: 9 },
+          { path: "new.png", kind: "file" as const, size: 4 },
+        ],
+      } as unknown as SandboxProvider,
+      workspace,
+      { path: "attachments" },
+    );
+    expect(inside.entries.map((entry) => entry.path)).toEqual(["new.png"]);
   });
 });

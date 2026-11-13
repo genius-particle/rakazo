@@ -12,14 +12,20 @@ import { describe, expect, it, vi } from "vitest";
 import {
   COMPACTION_BATCH_SIZE,
   compactHistory,
+  ensureToolReceiptsInSummary,
+  extractToolReceiptsFromBlocks,
   formatCompactedSummary,
   formatRecalledMemory,
+  formatToolReceiptLine,
   HISTORY_WINDOW_SIZE,
   historyWindowSize,
   MAX_COMPACTED_SUMMARY_CHARS,
   MAX_SUMMARIZE_PROMPT_CHARS,
+  MAX_TOOL_RECEIPTS_KEPT,
   MAX_TRANSCRIPT_CHARS,
+  mergeToolReceipts,
   nextCompactionBatchRange,
+  parseToolReceiptsSection,
   recordHistoryCompactAttemptsExhausted,
   SUMMARIZE_TIMEOUT_BASE_CHARS,
   SUMMARIZE_TIMEOUT_MAX_MS,
@@ -27,6 +33,7 @@ import {
   selectCompactedHistory,
   shouldEnqueueCompaction,
   summarizeTimeoutMs,
+  TOOL_RECEIPTS_HEADING,
 } from "./history-compaction.js";
 
 describe("shouldEnqueueCompaction", () => {
@@ -250,6 +257,7 @@ type HarnessMessage = {
   botId?: string;
   blocks: MessageBlock[];
   authorUserId?: string;
+  createdAt?: Date | string | null;
 };
 
 function compactionHarness(
@@ -539,6 +547,89 @@ describe("recordHistoryCompactAttemptsExhausted", () => {
   });
 });
 
+
+describe("tool receipt skeleton (P3)", () => {
+  it("formats durable receipt lines as tool|args|ok/fail|time", () => {
+    expect(
+      formatToolReceiptLine({
+        tool: "message_bot",
+        argsSummary: "to=三娃 intent=fyi text=连通验收，不用回",
+        ok: true,
+        time: "2026-11-08T06:35:00.000Z",
+      }),
+    ).toBe("message_bot|to=三娃 intent=fyi text=连通验收，不用回|ok|2026-11-08T06:35:00.000Z");
+  });
+
+  it("extracts bot_message_sent/received blocks instead of intent sentences", () => {
+    const lines = extractToolReceiptsFromBlocks(
+      [
+        {
+          kind: "bot_message_sent",
+          toBotId: "bot-san",
+          toBotName: "三娃",
+          text: "连通验收，不用回",
+          intent: "fyi",
+        },
+        {
+          kind: "bot_message_received",
+          fromBotId: "bot-er",
+          fromBotName: "二娃",
+          text: "ping",
+          intent: "request",
+        },
+      ],
+      "2026-11-08T06:35:00.000Z",
+    );
+    expect(lines).toEqual([
+      {
+        tool: "message_bot",
+        argsSummary: "to=三娃 intent=fyi text=连通验收，不用回",
+        ok: true,
+        time: "2026-11-08T06:35:00.000Z",
+      },
+      {
+        tool: "bot_message",
+        argsSummary: "from=二娃 intent=request text=ping",
+        ok: true,
+        time: "2026-11-08T06:35:00.000Z",
+      },
+    ]);
+  });
+
+  it("keeps recent N receipts and refuses to let intent sentences replace them", () => {
+    const prior = Array.from({ length: 5 }, (_, i) => ({
+      tool: "message_bot",
+      argsSummary: `to=旧目标${i}`,
+      ok: true,
+      time: `t${i}`,
+    }));
+    const previousSummary = `${TOOL_RECEIPTS_HEADING}\n${prior.map(formatToolReceiptLine).join("\n")}`;
+    const batch = [
+      {
+        tool: "message_bot",
+        argsSummary: "to=三娃 intent=fyi text=连通验收",
+        ok: true,
+        time: "2026-11-08T06:35:00.000Z",
+      },
+    ];
+    const ensured = ensureToolReceiptsInSummary("已联系三娃", batch, previousSummary, 4);
+    expect(ensured).toContain(TOOL_RECEIPTS_HEADING);
+    expect(ensured).toContain("message_bot|to=三娃 intent=fyi text=连通验收|ok|2026-11-08T06:35:00.000Z");
+    expect(ensured).not.toMatch(/^已联系三娃$/m);
+    const kept = parseToolReceiptsSection(ensured);
+    expect(kept).toHaveLength(4);
+    expect(kept.at(-1)?.argsSummary).toContain("to=三娃");
+  });
+
+  it("mergeToolReceipts drops duplicates and caps at maxKeep", () => {
+    const a = { tool: "message_bot", argsSummary: "to=A", ok: true, time: "t1" };
+    const b = { tool: "message_bot", argsSummary: "to=B", ok: true, time: "t2" };
+    expect(mergeToolReceipts([a, a], [a, b], 10)).toEqual([a, b]);
+    expect(mergeToolReceipts([a], [b], 1)).toEqual([b]);
+    expect(MAX_TOOL_RECEIPTS_KEPT).toBe(40);
+  });
+});
+
 describe("compactHistory", () => {
   it("summarizes the next batch, saves it through the provider, and advances the cursor", async () => {
     const harness = compactionHarness({ deploymentModelKey: "openrouter-key" });
@@ -549,6 +640,8 @@ describe("compactHistory", () => {
     const [request] = harness.runtime.run.mock.calls[0]!;
     expect(request.instructions).toContain("Current date and time");
     expect(request.instructions).toContain(`under ${MAX_COMPACTED_SUMMARY_CHARS} characters`);
+    expect(request.instructions).toContain("## Tool receipts");
+    expect(request.instructions).toContain("已联系三娃");
     expect(request.tools).toEqual([]);
     expect(request.model).toEqual({
       provider: "openrouter",
@@ -1557,5 +1650,36 @@ describe("compactHistory", () => {
     await compactHistory(harness.deps, "thread-1");
 
     expect(harness.jobs.enqueue).not.toHaveBeenCalled();
+  });
+
+  it("forces ## Tool receipts into the saved summary even when the model wrote 已联系三娃", async () => {
+    const messages: HarnessMessage[] = Array.from({ length: 50 }, (_, i) => ({
+      seq: i,
+      role: i % 2 === 0 ? "user" : "bot",
+      blocks: [{ kind: "text", text: `message ${i}` }] as MessageBlock[],
+      createdAt: new Date("2026-11-08T06:35:00.000Z"),
+    }));
+    messages[49]!.role = "bot";
+    messages[49]!.blocks = [
+      { kind: "text", text: "已联系三娃" },
+      {
+        kind: "bot_message_sent",
+        toBotId: "bot-san",
+        toBotName: "三娃",
+        text: "连通验收，不用回",
+        intent: "fyi",
+      },
+    ];
+    const harness = compactionHarness({ deploymentModelKey: "openrouter-key", messages });
+    harness.runtime.run = vi.fn<AgentRuntime["run"]>(async function* () {
+      yield { type: "done", text: "已联系三娃" };
+    });
+
+    await compactHistory(harness.deps, "thread-1");
+
+    const saved = harness.thread.historyCompactionSummary ?? "";
+    expect(saved).toContain(TOOL_RECEIPTS_HEADING);
+    expect(saved).toContain("message_bot|to=三娃 intent=fyi text=连通验收，不用回|ok|");
+    expect(saved).not.toMatch(/^已联系三娃$/m);
   });
 });

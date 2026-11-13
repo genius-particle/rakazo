@@ -4,6 +4,7 @@ const PROVIDER_NAMES: Record<string, string> = {
   whatsapp: "WhatsApp",
   telegram: "Telegram",
   lark: "Feishu",
+  grokbot: "Advisor",
   photon: "iMessage (Photon)",
 };
 

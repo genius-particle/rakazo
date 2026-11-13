@@ -19,6 +19,7 @@ import { SandboxDamagedError } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  attachmentKeepNames,
   checkpointAndStopComputer,
   checkpointComputerWorkspace,
   checkpointRunComputerWorkspace,
@@ -28,10 +29,12 @@ import {
   PortableFileBatcher,
   removeComputerWorkspaceDirectories,
   removeDeletedBotWorkspaces,
+  removeStaleWorkspaceAttachments,
   restoreComputerWorkspace,
   shouldSkipPortableWorkspaceFile,
   teamBrowserProfileName,
   WORKSPACE_SAVE_LIMITS,
+  workspaceAttachmentsDirectory,
 } from "./computer-workspace.js";
 import { FakeSandboxProvider } from "./fake-sandbox.js";
 import { LocalAgentHomeStore } from "./home.js";
@@ -750,6 +753,7 @@ function localWorkspaceSandbox(workspace: string) {
         const stdout = execFileSync(request.argv[0] ?? "bash", request.argv.slice(1), {
           cwd: workspace,
           encoding: "utf8",
+          env: { ...process.env, ...request.env },
           stdio: ["ignore", "pipe", "pipe"],
         });
         if (stdout) yield { type: "stdout" as const, data: stdout };
@@ -777,4 +781,70 @@ describe("PortableFileBatcher", () => {
     expect(batcher.add(PORTABLE_TRANSFER_BATCH_BYTES + 1)).toEqual([]);
     expect(batcher.take()).toEqual([PORTABLE_TRANSFER_BATCH_BYTES + 1]);
   });
+});
+
+describe("stale attachment copies", () => {
+  it("keeps only this turn's file names", () => {
+    expect(
+      attachmentKeepNames(new Set(["attachments/new.png", "bots/bot-1/attachments/also.png"])),
+    ).toEqual(["new.png", "also.png"]);
+    expect(workspaceAttachmentsDirectory("dedicated", "bot-1")).toBe("attachments");
+    expect(workspaceAttachmentsDirectory("team", "bot-1")).toBe("bots/bot-1/attachments");
+  });
+
+  it("deletes leftover attachment files and leaves this turn's image and other work", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "rakazo-attachments-"));
+    try {
+      await seedFile(root, "attachments/old.png", "old");
+      await seedFile(root, "attachments/new.png", "new");
+      await seedFile(root, "notes/plan.md", "plan");
+      await seedFile(root, "charts/plot.png", "plot");
+      await seedFile(root, "bots/bot-2/attachments/theirs.png", "theirs");
+      const computer = { id: "c", botId: "b", kind: "fake", providerRef: "c" } as ComputerRef;
+      await removeStaleWorkspaceAttachments(localWorkspaceSandbox(root), computer, {
+        mode: "dedicated",
+        botId: "bot-1",
+        allowed: new Set(["attachments/new.png"]),
+        context,
+      });
+      await expect(readFile(path.join(root, "attachments/old.png"), "utf8")).rejects.toThrow();
+      expect(await readFile(path.join(root, "attachments/new.png"), "utf8")).toBe("new");
+      expect(await readFile(path.join(root, "notes/plan.md"), "utf8")).toBe("plan");
+      expect(await readFile(path.join(root, "charts/plot.png"), "utf8")).toBe("plot");
+      expect(await readFile(path.join(root, "bots/bot-2/attachments/theirs.png"), "utf8")).toBe(
+        "theirs",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform !== "win32")(
+    "deletes leftover attachment files on a Windows desktop",
+    async () => {
+      const root = await mkdtemp(path.join(tmpdir(), "rakazo-attachments-win-"));
+      try {
+        await seedFile(root, "attachments/old.png", "old");
+        await seedFile(root, "attachments/new.png", "new");
+        await seedFile(root, "notes/plan.md", "plan");
+        const computer = {
+          id: "c",
+          botId: "b",
+          kind: "desktop",
+          providerRef: "c",
+        } as ComputerRef;
+        await removeStaleWorkspaceAttachments(localWorkspaceSandbox(root), computer, {
+          mode: "dedicated",
+          botId: "bot-1",
+          allowed: new Set(["attachments/new.png"]),
+          context,
+        });
+        await expect(readFile(path.join(root, "attachments/old.png"), "utf8")).rejects.toThrow();
+        expect(await readFile(path.join(root, "attachments/new.png"), "utf8")).toBe("new");
+        expect(await readFile(path.join(root, "notes/plan.md"), "utf8")).toBe("plan");
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

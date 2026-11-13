@@ -18,6 +18,7 @@ import type { ToolCall, ToolHandlers } from "./run-tool-gate.js";
 import { recordComputerAction } from "./run-tools-computer.js";
 import { attachWorkspaceFileToThread } from "./thread-artifacts.js";
 import { textContentArg } from "./tool-text.js";
+import { staleTurnAttachmentError } from "./turn-attachment-gate.js";
 import type { RunWorkspace } from "./workspace-file-tools.js";
 import { listFilesFromTool, readFileFromTool, renderPlotFromTool } from "./workspace-file-tools.js";
 
@@ -31,6 +32,7 @@ function runWorkspace(ctx: RunContext, call: ToolCall): RunWorkspace {
     markDirty: () => ctx.computer.checkpoint.markDirty(),
     context: ctx.context,
     runSecrets: ctx.secrets,
+    turnAttachmentPaths: ctx.computer.turnAttachmentPaths,
   };
 }
 
@@ -90,7 +92,9 @@ export const fileTools: ToolHandlers = {
     const { deps } = ctx;
     const { args } = call;
     const workspace = runWorkspace(ctx, call);
-    return readFileFromTool(deps.sandbox, workspace, args);
+    return readFileFromTool(deps.sandbox, workspace, args, {
+      acceptsImages: ctx.computer.acceptsImages,
+    });
   },
   async write_file(ctx, call) {
     const { deps, bot, context } = ctx;
@@ -134,6 +138,9 @@ export const fileTools: ToolHandlers = {
       await recordComputerAction(ctx, call, "attach_file", filePath, { error });
       return call.finish({ error, path: filePath });
     };
+    // An earlier copy must not be posted again as a new image in this thread.
+    const stale = staleTurnAttachmentError(filePath, ctx.computer.turnAttachmentPaths);
+    if (stale) return fail(stale.error);
     const read = await readWorkspaceFile(ctx, call, filePath);
     if ("error" in read) return fail(read.error);
     try {

@@ -21,6 +21,7 @@ export const READ_ONLY_AGENT_TOOLS = new Set([
   "list_files",
   "list_fleet",
   "read_file",
+  "user_computer_read",
   "read_history",
   "read_email",
   "search_history",
@@ -178,6 +179,7 @@ export function selectBuiltinToolsForRun(options: {
         ![
           "message_user",
           "message_bot",
+          "relay_to_bots",
           "handoff_to_bot",
           "message_agent",
           "generate_image",
@@ -187,7 +189,8 @@ export function selectBuiltinToolsForRun(options: {
       (emailMailbox || !EMAIL_INBOX_TOOL_NAMES.has(tool.name)) &&
       ((emailMailbox && options.emailSend) || tool.name !== "send_email") &&
       (emailClaimOffered || tool.name !== "claim_email_address") &&
-      (options.userComputer || tool.name !== "user_computer_shell") &&
+      (options.userComputer ||
+        (tool.name !== "user_computer_shell" && tool.name !== "user_computer_read")) &&
       ((options.userComputer && options.userComputerScreen) ||
         !USER_COMPUTER_SCREEN_TOOLS.has(tool.name)) &&
       // Already on a call, or reached through a messaging channel that cannot ring.

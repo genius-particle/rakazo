@@ -311,7 +311,7 @@ describe("read_email", () => {
     expect(result.emails).toEqual([expect.objectContaining({ id: "late" })]);
   });
 
-  it("reads one email whole, a page at a time, and copies its files", async () => {
+  it("reads one email whole, a page at a time, without copying its files", async () => {
     const { call, copyEarlierFiles } = fakeRun([
       row({
         text: "a".repeat(10_000),
@@ -332,17 +332,13 @@ describe("read_email", () => {
       from: "Shop <noreply@shop.test>",
       verified: false,
       nextTextOffset: 8_000,
-      files: [
-        { name: "invoice.pdf", path: "attachments/art-1.pdf" },
-        { name: "setup.exe", unavailable: true },
-      ],
+      files: [{ name: "invoice.pdf" }, { name: "setup.exe", unavailable: true }],
     });
+    expect(JSON.stringify(first.files)).not.toContain("attachments/");
     expect(String(first.text)).toHaveLength(8_000);
     expect(String(rest.text)).toHaveLength(2_000);
     expect(rest.nextTextOffset).toBeUndefined();
-    expect(copyEarlierFiles).toHaveBeenCalledWith([
-      expect.objectContaining({ kind: "file", artifactId: "art-1", name: "invoice.pdf" }),
-    ]);
+    expect(copyEarlierFiles).not.toHaveBeenCalled();
   });
 
   it("reads only this bot's mail, and only in its owner's runs", async () => {

@@ -58,6 +58,7 @@ import {
 import { recordPagePayment } from "./spending-gate.js";
 import { DESKTOP_HELD_FOR_TAKEOVER_MESSAGE } from "./takeover-resume.js";
 import { getActiveTeachingSession } from "./teaching-session.js";
+import { staleTurnAttachmentError } from "./turn-attachment-gate.js";
 import { vaultCardUseOf } from "./vault-card-use.js";
 
 function appendComputerCommand(ctx: RunContext, payload: ComputerCommand) {
@@ -525,9 +526,14 @@ export const computerTools: ToolHandlers = {
   async open_path(ctx, call) {
     const { deps, bot, context } = ctx;
     const { name, args } = call;
+    const requestedPath = String(args.path ?? "");
+    const stale = staleTurnAttachmentError(requestedPath, ctx.computer.turnAttachmentPaths);
+    if (stale) {
+      await recordComputerAction(ctx, call, "open_path", requestedPath, { error: stale.error });
+      return call.finish(stale);
+    }
     const blocked = await screenBlocked(ctx);
     if (blocked) return call.finish({ error: blocked });
-    const requestedPath = String(args.path ?? "");
     ctx.computer.checkpoint.markDirty();
     return computerScreenToolResult(async () => {
       try {

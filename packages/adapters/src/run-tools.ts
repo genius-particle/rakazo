@@ -28,9 +28,11 @@ import { taskTools } from "./run-tools-tasks.js";
 import {
   USER_COMPUTER_ACT_TOOL,
   USER_COMPUTER_OBSERVE_TOOL,
+  USER_COMPUTER_READ_TOOL,
   USER_COMPUTER_SHELL_TOOL,
   userComputerAct,
   userComputerObserve,
+  userComputerRead,
   userComputerShell,
 } from "./run-tools-user-computer.js";
 import { strategicInitiativeToolAllowed } from "./strategic-initiative.js";
@@ -47,6 +49,7 @@ const TOOL_HANDLERS = new Map<string, ToolHandler>([
   ...Object.entries(secretTools),
   ...Object.entries(fleetTools),
   [USER_COMPUTER_SHELL_TOOL, userComputerShell],
+  [USER_COMPUTER_READ_TOOL, userComputerRead],
   [USER_COMPUTER_OBSERVE_TOOL, userComputerObserve],
   [USER_COMPUTER_ACT_TOOL, userComputerAct],
   ...Object.entries(purchaseTools),

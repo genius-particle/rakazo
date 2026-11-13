@@ -236,6 +236,7 @@ export function describeToolActivity(
   if (toolName === "user_computer_observe") return `Looking at ${detail(record.app)}`;
   if (toolName === "user_computer_act") return `Using ${detail(record.app)}`;
   if (toolName === "read_file") return `Reading ${detail(record.path)}`;
+  if (toolName === "user_computer_read") return `Reading ${detail(record.path)} on your computer`;
   if (toolName === "write_file") return `Writing ${detail(record.path)}`;
   if (toolName === "list_files") return `Listing ${detail(record.path ?? ".")}`;
   if (toolName === "attach_file") return `Attaching ${detail(record.path)}`;
@@ -425,7 +426,7 @@ function toAgentTool(
         };
       }
       if (tool.name === "list_files") return { path: String(raw.path ?? "") };
-      if (tool.name === "read_file") {
+      if (tool.name === "read_file" || tool.name === "user_computer_read") {
         const offset = positiveIntegerArg(raw.offset);
         const limit = positiveIntegerArg(raw.limit);
         return {

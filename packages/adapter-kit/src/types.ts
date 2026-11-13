@@ -637,6 +637,13 @@ export interface AgentRunRequest {
   /** Atomically claim durable user steering at the runtime's next safe turn boundary. */
   claimSteering?: (seenIds: string[]) => Promise<AgentSteeringMessage[]>;
   /**
+   * P2 dispatch termination gate: given bot ids delivered via message_bot / relay_to_bots
+   * in this run, return which ones still have no bot_message child run since this run began.
+   */
+  verifyDispatchChildRuns?: (input: {
+    botIds: readonly string[];
+  }) => Promise<{ missingBotIds: string[] }>;
+  /**
    * Known run secret values, live for the run. The runtime redacts them from a tool
    * argument that is kept outside the tool call itself (the ask card's detail) before
    * any copy of it is stored, recorded or replayed.

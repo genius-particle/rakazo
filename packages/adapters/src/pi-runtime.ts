@@ -314,7 +314,80 @@ export class PiAgentRuntime implements AgentRuntime {
         resumeHost = host;
         const allTools = toAgentTools(toolDefs, host);
         const toolsByAgentName = agentToolDefinitions(toolDefs);
-        let tools = allTools;
+        // Claim→Receipt 守卫：按工具名记账（挡住「调了 message_user 却声称 message_bot ok」）
+        // P2：成功派单回执附带目标 botId，收工前核对对方是否真有 bot_message 新 run。
+        type ToolReceipt = {
+          name: string;
+          ok: boolean;
+          at: number;
+          targets?: Array<{ botId: string; name?: string }>;
+        };
+        const toolReceiptsThisRun: ToolReceipt[] = [];
+        let claimGuardFired = false;
+        let dispatchGateFired = false;
+        const countedTools = allTools.map((tool) => ({
+          ...tool,
+          execute: async (...args: unknown[]) => {
+            const name = String((tool as { name?: string }).name ?? "unknown");
+            const recordReceipt = (
+              toolName: string,
+              ok: boolean,
+              targets?: Array<{ botId: string; name?: string }>,
+            ) => {
+              const at = Date.now();
+              const entry: ToolReceipt = { name: toolName, ok, at };
+              if (targets?.length) entry.targets = targets;
+              toolReceiptsThisRun.push(entry);
+              // find_tool→use_tool 包装：同时记内层工具名，否则 DISPATCH_CLAIM 认不到
+              // relay_to_bots / message_bot 的成功回执。
+              if (toolName === "use_tool") {
+                const params = args[1];
+                const inner =
+                  params && typeof params === "object"
+                    ? String(
+                        (params as { name?: unknown; tool?: unknown; toolName?: unknown }).name ??
+                          (params as { tool?: unknown }).tool ??
+                          (params as { toolName?: unknown }).toolName ??
+                          "",
+                      ).trim()
+                    : "";
+                if (inner && inner !== toolName) {
+                  const innerEntry: ToolReceipt = { name: inner, ok, at };
+                  if (targets?.length) innerEntry.targets = targets;
+                  toolReceiptsThisRun.push(innerEntry);
+                }
+              }
+            };
+            try {
+              const result = await Promise.resolve(
+                (tool as { execute: (...a: unknown[]) => unknown }).execute(...args),
+              );
+              // Prefer explicit result.ok / details.ok when the tool returns a structured
+              // receipt (relay_to_bots / message_bot). Non-throw alone is not enough when
+              // an explicit ok is present.
+              let ok = true;
+              if (result && typeof result === "object") {
+                const r = result as { ok?: unknown; details?: unknown };
+                if ("ok" in r) {
+                  ok = Boolean(r.ok);
+                } else if (
+                  r.details &&
+                  typeof r.details === "object" &&
+                  "ok" in (r.details as object)
+                ) {
+                  ok = Boolean((r.details as { ok?: unknown }).ok);
+                }
+              }
+              const targets = ok ? extractDispatchTargets(name, args[1], result) : [];
+              recordReceipt(name, ok, targets.length ? targets : undefined);
+              return result;
+            } catch (err) {
+              recordReceipt(name, false);
+              throw err;
+            }
+          },
+        }));
+        let tools = countedTools;
         const seenSteeringIds: string[] = [];
         const initialSteering = request.claimSteering ? await request.claimSteering([]) : [];
         let hasCurrentImages = Boolean(
@@ -545,7 +618,7 @@ export class PiAgentRuntime implements AgentRuntime {
           }
         };
         const modeTools = () => {
-          if (!computer) return allTools;
+          if (!computer) return countedTools;
           const transition = computerTransitionTool(
             mode,
             async () => {
@@ -594,7 +667,7 @@ export class PiAgentRuntime implements AgentRuntime {
           )
             throw new Error("Computer mode tool name collision");
           return [
-            ...allTools.filter(
+            ...countedTools.filter(
               (tool) => mode === "computer" || !COMPUTER_MODE_TOOLS.has(tool.label),
             ),
             transition,
@@ -639,6 +712,61 @@ export class PiAgentRuntime implements AgentRuntime {
               turn,
               turnSignal,
             );
+            // Claim→Receipt 守卫：完成断言必须绑到本 run 的工具回执
+            if (!claimGuardFired) {
+              const claimed = lastAssistantTextFromTurn(turn);
+              const miss = missingReceiptForClaim(claimed, toolReceiptsThisRun);
+              if (miss !== null) {
+                claimGuardFired = true;
+                console.info(
+                  "[claim-receipt] steer",
+                  JSON.stringify({
+                    miss,
+                    tools: toolReceiptsThisRun.map((r) => `${r.name}:${r.ok ? "ok" : "fail"}`),
+                  }),
+                );
+                agent.steer({
+                  role: "user",
+                  content: claimReceiptNote(miss),
+                  timestamp: Date.now(),
+                });
+              }
+            }
+            // P2 派单终止门：工具回执 ok 仍要核对目标 bot 是否真有 bot_message 新 run
+            if (!dispatchGateFired && request.verifyDispatchChildRuns) {
+              const targets = collectSuccessfulDispatchTargets(toolReceiptsThisRun);
+              if (targets.length) {
+                try {
+                  const verified = await request.verifyDispatchChildRuns({
+                    botIds: targets.map((t) => t.botId),
+                  });
+                  if (verified.missingBotIds.length) {
+                    dispatchGateFired = true;
+                    const missingLabels = verified.missingBotIds.map((id) => {
+                      const hit = targets.find((t) => t.botId === id);
+                      return hit?.name ? `${hit.name}(${id})` : id;
+                    });
+                    console.info(
+                      "[dispatch-gate] steer",
+                      JSON.stringify({
+                        missingBotIds: verified.missingBotIds,
+                        targets: targets.map((t) => `${t.name ?? "?"}:${t.botId}`),
+                      }),
+                    );
+                    agent.steer({
+                      role: "user",
+                      content: dispatchGateNote(missingLabels),
+                      timestamp: Date.now(),
+                    });
+                  }
+                } catch (err) {
+                  console.warn(
+                    "[dispatch-gate] verify failed",
+                    err instanceof Error ? err.message : err,
+                  );
+                }
+              }
+            }
           },
           prepareNextTurnWithContext: async (turn) => {
             const update = computer
@@ -1281,4 +1409,140 @@ export class PiAgentRuntime implements AgentRuntime {
       if (running.get(request.runId) === active) running.delete(request.runId);
     }
   }
+}
+
+
+// ---- Claim→Receipt 守卫（本地补丁） ----
+const CLAIM_RECEIPT_PATTERN =
+  /已(发送|发出|通知|转告|转达|委托|派发|调用|执行|创建|删除|修改|写入|保存|回复|提交|上传|下载|重启|启动)|发送成功|执行成功|已经(发送|通知|转告|调用|执行)|has been sent|sent successfully|completed successfully|返回 ok|均返回 ok/i;
+
+/** 派单/转告类完成断言：只抓完成态，不抓裸工具名（避免「找不到 message_bot」误伤） */
+const DISPATCH_CLAIM_PATTERN =
+  /已(发送|发出|通知|转告|转达|委托|派发).{0,24}(三娃|六娃|油条|bot)|已成功(调用|使用).{0,16}(message_bot|relay_to_bots)|(message_bot|relay_to_bots).{0,16}(成功|返回\s*ok|\bok\b)|三条.{0,16}(均|都).{0,12}ok|均返回 ok|returned ok/i;
+
+const DISPATCH_RECEIPT_TOOLS = new Set(["message_bot", "relay_to_bots"]);
+
+function hasSuccessfulReceipt(
+  receipts: ReadonlyArray<{ name: string; ok: boolean }>,
+  names: ReadonlySet<string>,
+): boolean {
+  return receipts.some((r) => r.ok && names.has(r.name));
+}
+
+/**
+ * 返回缺的回执标签：
+ * - "message_bot"：派单断言但无 message_bot/relay 成功
+ * - "*"：一般完成断言且本 run 零工具
+ * - null：不触发
+ */
+function missingReceiptForClaim(
+  claimed: string,
+  receipts: ReadonlyArray<{ name: string; ok: boolean }>,
+): string | null {
+  if (!claimed.trim()) return null;
+  if (DISPATCH_CLAIM_PATTERN.test(claimed)) {
+    return hasSuccessfulReceipt(receipts, DISPATCH_RECEIPT_TOOLS) ? null : "message_bot";
+  }
+  if (CLAIM_RECEIPT_PATTERN.test(claimed) && receipts.length === 0) return "*";
+  return null;
+}
+
+function claimReceiptNote(miss: string): string {
+  if (miss === "message_bot") {
+    return "【校验】你刚才声称已向其他 bot 发送/转达且获得回执，但本运行没有成功的 message_bot（或 relay_to_bots）工具回执。请改口为「未发送/未转告」，或引用本运行中已有的成功回执；本轮不要仅为通过校验而新发 bot 消息。不要把 message_user 或其他工具的调用说成已派给下属 bot。";
+  }
+  return "【校验】本次运行中你还没有调用任何工具，但你刚才的回复声称某个动作已经完成。请改口为「未执行」，或引用本运行中已有的工具成功回执；本轮不要仅为通过校验而重新派发/调用工具。不要重复未经工具回执的完成声明。";
+}
+
+/** 从 message_bot / relay_to_bots（含 use_tool 包装）结果里抽出已成功投递的 botId。 */
+function extractDispatchTargets(
+  toolName: string,
+  params: unknown,
+  result: unknown,
+): Array<{ botId: string; name?: string }> {
+  let effective = toolName;
+  if (toolName === "use_tool" && params && typeof params === "object") {
+    const inner = String(
+      (params as { name?: unknown; tool?: unknown; toolName?: unknown }).name ??
+        (params as { tool?: unknown }).tool ??
+        (params as { toolName?: unknown }).toolName ??
+        "",
+    ).trim();
+    if (inner) effective = inner;
+  }
+  if (!DISPATCH_RECEIPT_TOOLS.has(effective)) return [];
+  const root = result && typeof result === "object" ? (result as Record<string, unknown>) : null;
+  if (!root) return [];
+  const details =
+    root.details && typeof root.details === "object"
+      ? (root.details as Record<string, unknown>)
+      : root;
+  const out: Array<{ botId: string; name?: string }> = [];
+  const push = (botId: unknown, name?: unknown) => {
+    if (typeof botId !== "string" || !botId.trim()) return;
+    out.push({
+      botId: botId.trim(),
+      ...(typeof name === "string" && name.trim() ? { name: name.trim() } : {}),
+    });
+  };
+  push(details.botId, details.name);
+  for (const key of ["results", "succeeded"] as const) {
+    const rows = details[key];
+    if (!Array.isArray(rows)) continue;
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const r = row as { ok?: unknown; botId?: unknown; name?: unknown };
+      if (key === "results" && "ok" in r && !r.ok) continue;
+      push(r.botId, r.name);
+    }
+  }
+  const seen = new Set<string>();
+  return out.filter((t) => (seen.has(t.botId) ? false : (seen.add(t.botId), true)));
+}
+
+function collectSuccessfulDispatchTargets(
+  receipts: ReadonlyArray<{
+    name: string;
+    ok: boolean;
+    targets?: Array<{ botId: string; name?: string }>;
+  }>,
+): Array<{ botId: string; name?: string }> {
+  const out: Array<{ botId: string; name?: string }> = [];
+  const seen = new Set<string>();
+  for (const r of receipts) {
+    if (!r.ok || !DISPATCH_RECEIPT_TOOLS.has(r.name) || !r.targets?.length) continue;
+    for (const t of r.targets) {
+      if (seen.has(t.botId)) continue;
+      seen.add(t.botId);
+      out.push(t);
+    }
+  }
+  return out;
+}
+
+function dispatchGateNote(missingLabels: readonly string[]): string {
+  const who = missingLabels.length ? missingLabels.join("、") : "目标 bot";
+  return `【校验·派单终止门】本运行的 message_bot/relay_to_bots 回执显示已投递，但以下目标在时间窗内没有出现 bot_message 新 run：${who}。请改口为「未确认对方已收到/未唤醒」，不要声称派单完成；本轮不要仅为通过校验而重新派发。`;
+}
+
+function lastAssistantTextFromTurn(turn: unknown): string {
+  const messages =
+    (turn as { context?: { messages?: unknown[] } } | undefined)?.context?.messages ?? [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: string; content?: unknown } | undefined;
+    if (!message || message.role !== "assistant") continue;
+    const content = message.content;
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content
+        .map((part) =>
+          part && typeof part === "object" && "text" in (part as object)
+            ? String((part as { text?: unknown }).text ?? "")
+            : "",
+        )
+        .join(" ");
+    }
+    return "";
+  }
+  return "";
 }

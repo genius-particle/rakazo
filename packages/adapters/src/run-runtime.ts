@@ -184,6 +184,16 @@ export function createRunRuntime(
   },
 ) {
   const { messaging, ...executorDeps } = deps;
+  const advisorMounted = (() => {
+    try {
+      return Boolean(messaging?.platforms().some((platform) => platform.provider === "grokbot"));
+    } catch {
+      return false;
+    }
+  })();
+  const advisorThreadId = advisorMounted
+    ? `grokbot:${process.env.MESSAGING_GROKBOT_PEER_ADDRESS?.trim() || "dawa"}`
+    : undefined;
   const executor = createRunExecutor({
     ...executorDeps,
     maxUploadSizeBytes: env.maxUploadSizeBytes,
@@ -208,6 +218,8 @@ export function createRunRuntime(
     phoneCallCooldownMinutes: env.phoneCallCooldownMinutes,
     inboundEmailDomain: env.inboundEmailDomain,
     messaging: messaging ? createMessagingContextLoader(deps.prisma) : undefined,
+    sendToMessagingThread: messaging ? messaging.sendToThread.bind(messaging) : undefined,
+    advisorThreadId,
     web: createWebProvider(),
   });
   const jobHandlers = createBackgroundJobHandlers({

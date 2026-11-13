@@ -1,6 +1,6 @@
 import type { ConnectorTool } from "@rakazo/adapter-kit";
 import { describe, expect, it } from "vitest";
-import { appendMemoryFact, editMemory, selectMemoryTools } from "./memory-tools.js";
+import { appendMemoryFact, editMemory, memorySelfPollutionTool, selectMemoryTools } from "./memory-tools.js";
 
 function tool(name: string): ConnectorTool {
   return { name, description: name, inputSchema: { type: "object", properties: {} } };
@@ -147,5 +147,28 @@ describe("editMemory", () => {
   it("lets a save that shrinks oversized memory through", () => {
     const oversized = `${"a".repeat(40)}\n${"b".repeat(40)}\n`;
     expect(editMemory(oversized, "", "bbb", 32)).toEqual({ content: `${"a".repeat(40)}\n` });
+  });
+});
+
+describe("memorySelfPollutionTool (P4)", () => {
+  it("blocks 没有/禁用 of platform builtins including message_bot", () => {
+    expect(memorySelfPollutionTool("没有 message_bot 工具")).toBe("message_bot");
+    expect(memorySelfPollutionTool("平台禁用了 relay_to_bots")).toBe("relay_to_bots");
+    expect(memorySelfPollutionTool("找不到 web_search")).toBe("web_search");
+    expect(memorySelfPollutionTool("shell is unavailable on this bot")).toBe("shell");
+    expect(memorySelfPollutionTool("this bot does not have message_user")).toBe("message_user");
+  });
+
+  it("allows normal facts and contested owner-confirmed notes", () => {
+    expect(memorySelfPollutionTool("主人喜欢简洁汇报")).toBeNull();
+    expect(memorySelfPollutionTool("上次用 message_bot 联系了三娃")).toBeNull();
+    expect(
+      memorySelfPollutionTool("contested: message_bot unavailable (owner-confirmed)"),
+    ).toBeNull();
+  });
+
+  it("ignores denial without a guarded tool name", () => {
+    expect(memorySelfPollutionTool("没有外部支付接口")).toBeNull();
+    expect(memorySelfPollutionTool("禁用夜间自动回复")).toBeNull();
   });
 });

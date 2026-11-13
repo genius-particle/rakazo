@@ -8,10 +8,15 @@ import { readHistory, searchHistory } from "@rakazo/db";
 import { sharedMemorySaveError } from "./builtin-tools.js";
 import { redactConnectorPayload } from "./connector-safety.js";
 import { MAX_RECALLED_MEMORIES } from "./history-compaction.js";
-import { editMemory } from "./memory-tools.js";
+import {
+  editMemory,
+  MEMORY_SELF_POLLUTION_ERROR,
+  memorySelfPollutionTool,
+} from "./memory-tools.js";
 import type { RunContext } from "./run-context.js";
 import type { ToolCall, ToolHandlers } from "./run-tool-gate.js";
 import { argsError } from "./tool-args.js";
+import { omitAttachmentWorkspacePaths } from "./turn-attachment-gate.js";
 
 /** Cross-chat history requires a surviving direct human request in this app thread. */
 export function historyMyChatsAllowed(
@@ -69,7 +74,7 @@ async function readHistoryTool(ctx: RunContext, call: ToolCall) {
     if (!parsed.success) return call.finish({ error: argsError(parsed.error) });
     response = await readHistory(deps.prisma, scope, parsed.data);
   }
-  const redacted = redactConnectorPayload(response, ctx.secrets);
+  const redacted = omitAttachmentWorkspacePaths(redactConnectorPayload(response, ctx.secrets));
   // Redaction can expand short synthetic credentials; never let Pi clip the JSON.
   if (Buffer.byteLength(JSON.stringify(redacted), "utf8") > 11_000) {
     return call.finish({
@@ -78,18 +83,8 @@ async function readHistoryTool(ctx: RunContext, call: ToolCall) {
         "Redacted history exceeds the response budget. Retry with limit 1 or a narrower linked run.",
     });
   }
-  // Files the bot can now see are copied before its next computer tool.
-  ctx.computer.copyEarlierFiles(
-    response.messages.flatMap((message) =>
-      (message.attachments ?? []).map((file) => ({
-        kind: "file" as const,
-        artifactId: file.artifactId,
-        name: file.name,
-        mimeType: file.mimeType,
-        size: file.size,
-      })),
-    ),
-  );
+  // The excerpt stays in the tool result. It is not copied onto the computer and
+  // does not join this turn's attachment paths.
   return call.finish(redacted);
 }
 
@@ -98,6 +93,12 @@ export const memoryTools: ToolHandlers = {
   async remember(ctx, call) {
     const { deps, runId, bot, thread, context } = ctx;
     const { args } = call;
+    // P4：拒写「没有/禁用 内置工具」类自污染记忆
+    const pollution = memorySelfPollutionTool(String(args.content ?? ""));
+    if (pollution) {
+      console.info("[memory-pollution] blocked remember", JSON.stringify({ tool: pollution }));
+      return call.finish({ error: MEMORY_SELF_POLLUTION_ERROR(pollution) });
+    }
     // One document per bot keeps the size cap meaningful.
     const path = MEMORY_INDEX_PATH;
     // A concurrent save changes the revision, so re-read and apply the edit again.
@@ -182,6 +183,12 @@ export const memoryTools: ToolHandlers = {
   async save_memory(ctx, call) {
     const { bot, context } = ctx;
     const { args } = call;
+    // P4：语义记忆同样拒写工具自污染
+    const pollution = memorySelfPollutionTool(String(args.content ?? ""));
+    if (pollution) {
+      console.info("[memory-pollution] blocked save_memory", JSON.stringify({ tool: pollution }));
+      return call.finish({ error: MEMORY_SELF_POLLUTION_ERROR(pollution) });
+    }
     return call.finish(
       await ctx.memory.semantic!.save(
         {

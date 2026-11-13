@@ -167,6 +167,125 @@ const REMOVE_CONTAINED_DIRECTORIES = [
  * Delete folders on the computer. Each name is checked on its own: a symlinked parent is
  * refused, a final symlink is unlinked, and one refused name does not stop the rest.
  */
+const REMOVE_STALE_ATTACHMENTS = [
+  'dir="$1"',
+  "shift",
+  'case "$dir" in',
+  '  *..*|*//*|-*|/*) echo "attachment cleanup escapes the workspace" >&2; exit 1 ;;',
+  "esac",
+  'if [ ! -d "$dir" ] || [ -L "$dir" ]; then exit 0; fi',
+  'cd -- "$dir" || exit 0',
+  "for name in *; do",
+  '  if [ ! -e "$name" ] && [ ! -L "$name" ]; then continue; fi',
+  "  keep=0",
+  '  for allowed in "$@"; do',
+  '    if [ "$name" = "$allowed" ]; then keep=1; break; fi',
+  "  done",
+  '  if [ "$keep" -eq 1 ]; then continue; fi',
+  '  if [ -L "$name" ] || [ -f "$name" ]; then rm -f -- "$name"; fi',
+  "done",
+].join("\n");
+
+// Desktop on Windows has PowerShell, not a POSIX shell. Cloud computers keep bash.
+const REMOVE_STALE_ATTACHMENTS_POWERSHELL = [
+  "$ErrorActionPreference = 'Stop'",
+  "$dir = $env:RAKAZO_ATTACHMENT_DIR",
+  "if ([string]::IsNullOrEmpty($dir) -or $dir -match '\\.\\.|//' -or $dir.StartsWith('-') -or $dir.StartsWith('/') -or $dir.StartsWith('\\')) {",
+  "  Write-Error 'attachment cleanup escapes the workspace'",
+  "  exit 1",
+  "}",
+  "if (-not (Test-Path -LiteralPath $dir)) { exit 0 }",
+  "$item = Get-Item -LiteralPath $dir -Force",
+  "if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 0 }",
+  "$keep = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::Ordinal)",
+  "if ($env:RAKAZO_ATTACHMENT_KEEP) {",
+  '  foreach ($name in ($env:RAKAZO_ATTACHMENT_KEEP -split "`n")) { if ($name) { [void]$keep.Add($name) } }',
+  "}",
+  "Get-ChildItem -LiteralPath $dir -Force | ForEach-Object {",
+  "  if ($keep.Contains($_.Name)) { return }",
+  "  if (($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -or -not $_.PSIsContainer) {",
+  "    Remove-Item -LiteralPath $_.FullName -Force",
+  "  }",
+  "}",
+].join("\n");
+
+/** Basenames of this turn's attachment copies. Anything else in the directory is leftover history. */
+export function attachmentKeepNames(allowed: ReadonlySet<string>): string[] {
+  const names = new Set<string>();
+  for (const key of allowed) {
+    const slash = key.lastIndexOf("/");
+    const name = slash < 0 ? key : key.slice(slash + 1);
+    if (
+      !name ||
+      name === "." ||
+      name === ".." ||
+      name.includes("/") ||
+      name.includes("\\") ||
+      /[\r\n\0]/.test(name)
+    )
+      continue;
+    if (!key.replace(/\\/g, "/").endsWith(`attachments/${name}`)) continue;
+    names.add(name);
+  }
+  return [...names];
+}
+
+/** Where this bot's platform attachment copies live. */
+export function workspaceAttachmentsDirectory(mode: ComputerMode, botId: string): string {
+  if (mode !== "team") return "attachments";
+  if (!isTeamBotFolderName(botId)) throw new Error("attachment cleanup escapes the workspace");
+  return `${teamBotWorkspaceDirectory(botId)}/attachments`;
+}
+
+/**
+ * Delete attachment copies that are not part of this turn. Current-turn names are kept.
+ * Runs on the live workspace, including a home that was restored from an older checkpoint.
+ */
+export async function removeStaleWorkspaceAttachments(
+  sandbox: SandboxProvider,
+  computer: ComputerRef,
+  input: {
+    mode: ComputerMode;
+    botId: string;
+    allowed: ReadonlySet<string>;
+    context: AdapterContext;
+  },
+): Promise<void> {
+  const directory = workspaceAttachmentsDirectory(input.mode, input.botId);
+  const keepNames = attachmentKeepNames(input.allowed);
+  const windowsDesktop = computer.kind === "desktop" && process.platform === "win32";
+  let exitCode: number | undefined;
+  let stderr = "";
+  for await (const event of sandbox.execute(
+    computer,
+    {
+      argv: windowsDesktop
+        ? [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            REMOVE_STALE_ATTACHMENTS_POWERSHELL,
+          ]
+        : ["bash", "-eu", "-c", REMOVE_STALE_ATTACHMENTS, "bash", directory, ...keepNames],
+      cwd: ".",
+      ...(windowsDesktop
+        ? {
+            env: {
+              RAKAZO_ATTACHMENT_DIR: directory,
+              RAKAZO_ATTACHMENT_KEEP: keepNames.join("\n"),
+            },
+          }
+        : {}),
+    },
+    input.context,
+  )) {
+    if (event.type === "stderr") stderr += event.data;
+    if (event.type === "exit") exitCode = event.code;
+  }
+  if (exitCode !== 0) throw new Error(stderr.trim() || "attachment cleanup failed");
+}
+
 export async function removeComputerWorkspaceDirectories(
   sandbox: SandboxProvider,
   computer: ComputerRef,

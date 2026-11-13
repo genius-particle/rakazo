@@ -1,4 +1,5 @@
 import type {
+  AdapterContext,
   AgentContextStrategy,
   AgentHomeStore,
   AgentRuntime,
@@ -10,6 +11,8 @@ import type {
   ManagedConnectorProvider,
   MediaGenerationProvider,
   MemoryStore,
+  MessagingSendRequest,
+  MessagingSendResult,
   NotificationProvider,
   PaidServiceProvider,
   PaymentWalletProvider,
@@ -65,6 +68,13 @@ export interface ExecutorDeps {
   phoneCallRingSeconds?: number;
   /** Messaging surface; absent means zero identity queries and no chat prompts. */
   messaging?: { hasIdentity(botId: string): Promise<boolean> };
+  /** Sends a platform messaging DM from tools (the advisor channel); absent when no surface is mounted. */
+  sendToMessagingThread?: (
+    request: MessagingSendRequest,
+    context: AdapterContext,
+  ) => Promise<MessagingSendResult>;
+  /** Prepared advisor thread id ("grokbot:<peer>"); absent when the channel is not mounted. */
+  advisorThreadId?: string;
   listConnectedPluginSlugs?: (userId: string) => Promise<string[]>;
   /** Builtin web_search / web_fetch. Defaults to keyless HTTP when omitted. */
   web?: WebProvider;
