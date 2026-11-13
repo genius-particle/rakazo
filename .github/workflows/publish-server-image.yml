@@ -29,11 +29,11 @@ on:
   workflow_dispatch:
     inputs:
       images:
-        description: "Comma separated images to build (app, computer, updater). Empty builds all."
+        description: 'JSON array of images to build, e.g. ["app","computer"]. Empty builds all.'
         type: string
         default: ""
       archs:
-        description: "Comma separated architectures (amd64, arm64). Empty builds all."
+        description: 'JSON array of architectures, e.g. ["amd64"]. Empty builds all.'
         type: string
         default: ""
 
@@ -127,8 +127,8 @@ jobs:
       matrix:
         # A manual dispatch may narrow the matrix: a self-hosted deployment only needs the amd64
         # app and computer images. An empty input keeps every image and architecture, as before.
-        name: ${{ fromJSON(format('["{0}"]', replace(replace(github.event_name == 'workflow_dispatch' && github.event.inputs.images || 'app,updater,computer', ' ', ''), ',', '","'))) }}
-        arch: ${{ fromJSON(format('["{0}"]', replace(replace(github.event_name == 'workflow_dispatch' && github.event.inputs.archs || 'amd64,arm64', ' ', ''), ',', '","'))) }}
+        name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.images != '' && fromJSON(github.event.inputs.images) || fromJSON('["app","updater","computer"]') }}
+        arch: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.archs != '' && fromJSON(github.event.inputs.archs) || fromJSON('["amd64","arm64"]') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
