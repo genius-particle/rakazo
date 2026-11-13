@@ -112,15 +112,12 @@ jobs:
     # A Depot outage must not block deploys, so any failed Depot build rebuilds every image here.
     if: >-
       !cancelled() && github.event_name != 'pull_request' &&
-      (vars.DEPOT_PROJECT_ID == '' || contains(needs.build-depot.outputs.*, 'failed')) &&
-      (github.event_name != 'workflow_dispatch' ||
-       ((github.event.inputs.images == '' || contains(github.event.inputs.images, matrix.name)) &&
-        (github.event.inputs.archs == '' || contains(github.event.inputs.archs, matrix.arch))))
+      (vars.DEPOT_PROJECT_ID == '' || contains(needs.build-depot.outputs.*, 'failed'))
     needs: [build-depot]
     # Each architecture builds natively on its own runner and pushes by digest only.
     # No QEMU: GitHub hosts native arm64 runners, and emulated arm64 took hours for the
     # desktop-sized computer image. See docs/self-host-upgrading.md (Published images and tags).
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     timeout-minutes: 90
     permissions:
       contents: read
@@ -128,24 +125,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        name: [app, updater, computer]
-        arch: [amd64, arm64]
-        include:
-          # Only the updater image contains the Docker CLI; the application image stays unprivileged.
-          # The supervisor is not a separate published image: it runs from `app` on the internal network.
-          - name: app
-            dockerfile: infra/compose/Dockerfile
-            context: .
-          - name: updater
-            dockerfile: infra/updater/Dockerfile
-            context: .
-          - name: computer
-            dockerfile: infra/sandboxes/computer/Dockerfile
-            context: infra/sandboxes/computer
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+        # A manual dispatch may narrow the matrix: a self-hosted deployment only needs the amd64
+        # app and computer images. An empty input keeps every image and architecture, as before.
+        name: ${{ fromJSON(format('["{0}"]', replace(replace(github.event_name == 'workflow_dispatch' && github.event.inputs.images || 'app,updater,computer', ' ', ''), ',', '","'))) }}
+        arch: ${{ fromJSON(format('["{0}"]', replace(replace(github.event_name == 'workflow_dispatch' && github.event.inputs.archs || 'amd64,arm64', ' ', ''), ',', '","'))) }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -166,8 +149,10 @@ jobs:
       - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
-          context: ${{ matrix.context }}
-          file: ${{ matrix.dockerfile }}
+          # Only the updater image contains the Docker CLI; the application image stays unprivileged.
+          # The supervisor is not a separate published image: it runs from `app` on the internal network.
+          context: ${{ matrix.name == 'computer' && 'infra/sandboxes/computer' || '.' }}
+          file: ${{ matrix.name == 'app' && 'infra/compose/Dockerfile' || matrix.name == 'updater' && 'infra/updater/Dockerfile' || 'infra/sandboxes/computer/Dockerfile' }}
           platforms: linux/${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           # A fork can publish only to its own namespace; no credential can redirect this value.
