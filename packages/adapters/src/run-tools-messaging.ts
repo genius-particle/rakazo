@@ -402,12 +402,18 @@ export const messagingTools: ToolHandlers = {
       // A refusal has to look like one. Reporting `ok: true` with a note saying "not posted"
       // read as a success with a caveat, so a model that had more to say reworded the call and
       // tried again until the loop guard stopped the run — hundreds of times in the worst case.
+      //
+      // Only a spent budget is final: no later call in this run can post anything. The
+      // first-seconds refusal clears itself with time, so it must not feed the run-level streak
+      // that ends the turn — a run that finishes in under a minute would be stopped with its
+      // answer never delivered.
+      const budgetUsed = midTurnProgressBudgetUsed(progressSinceBudgetStart(reply));
       return call.finish({
         ok: false,
-        refused: true,
-        error: midTurnProgressBudgetUsed(progressSinceBudgetStart(reply))
+        ...(budgetUsed ? { refused: true } : {}),
+        error: budgetUsed
           ? `Progress budget for this run is used up (${MID_TURN_PROGRESS_MAX_PER_RUN}/${MID_TURN_PROGRESS_MAX_PER_RUN}). Nothing was sent and retrying will not help. Put the remaining content in your final reply.`
-          : `Nothing was sent: no progress update can be posted in the first ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds of a turn. Either wait until the turn has run ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds before sending one, or put this content in your final reply. Do not retry it now with different wording.`,
+          : `Nothing was sent: no progress update can be posted in the first ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds of a turn. Do not retry this call — put this content in your final reply instead, where the person reads it.`,
       });
     }
     await publishInterimMessage(ctx, text, true);

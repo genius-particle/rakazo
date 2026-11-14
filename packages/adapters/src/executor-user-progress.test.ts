@@ -818,15 +818,19 @@ describe("notes that can't be posted as messages", () => {
     // Nothing was sent, so the call is a failure the model cannot act on by sending again.
     const notYet = expect.objectContaining({
       ok: false,
-      refused: true,
-      error: expect.stringContaining("Do not retry it now with different wording"),
+      error: expect.stringContaining("put this content in your final reply instead"),
     });
     const stop = expect.objectContaining({
       ok: false,
       refused: true,
       error: expect.stringContaining("Nothing was sent and retrying will not help"),
     });
-    expect(await update()).toMatchObject({ result: notYet, sent: [] });
+    const firstCall = await update();
+    expect(firstCall.sent).toEqual([]);
+    expect(firstCall.result).toMatchObject(notYet);
+    // The first-seconds refusal clears itself with time, so it is a plain failure: counting it
+    // toward the streak would end a run that finishes inside a minute with nothing delivered.
+    expect((firstCall.result as { refused?: boolean }).refused).toBeUndefined();
 
     const earlier = ["One.", "Two.", "Three."];
     const longTurn = new Date(Date.now() - 120_000);
@@ -841,10 +845,23 @@ describe("notes that can't be posted as messages", () => {
   });
 
   it("stops a run that keeps sending what message_user refused, however it rewords it", async () => {
+    // A spent budget refuses every further send in this run for good, which is what the streak
+    // counts. The first-seconds refusal is different: it clears itself, so it stays a plain
+    // failure and never ends a run that finishes inside a minute.
+    const earlier = ["One.", "Two.", "Three."];
+    const longTurn = new Date(Date.now() - 120_000);
     const { finalizeRun, messages } = await runTurn("", false, undefined, [], "fyi", {
+      startedAt: longTurn,
       trigger: "user",
       runtime: async function* (request) {
-        for (const [index, text] of ["One.", "Two.", "Three."].entries()) {
+        for (const [index, message] of earlier.entries()) {
+          const executionId = `earlier-${index}`;
+          yield { type: "tool", name: "message_user", args: { message }, executionId };
+          expect(
+            await request.executeTool!("message_user", { message }, executionId),
+          ).toMatchObject({ ok: true });
+        }
+        for (const [index, text] of ["Four.", "Five.", "Six."].entries()) {
           const executionId = `call-${index}`;
           yield { type: "tool", name: "message_user", args: { message: text }, executionId };
           const result = await request.executeTool!("message_user", { message: text }, executionId);
@@ -854,20 +871,20 @@ describe("notes that can't be posted as messages", () => {
         yield {
           type: "tool",
           name: "message_user",
-          args: { message: "Four." },
+          args: { message: "Seven." },
           executionId: "call-4",
         };
-        await request.executeTool!("message_user", { message: "Four." }, "call-4");
+        await request.executeTool!("message_user", { message: "Seven." }, "call-4");
         yield { type: "text", text: "Done." };
         yield { type: "done", text: "" };
       },
     });
-    // None of the four reached the chat, and the fourth attempt ended the run instead.
+    // None of the four refused ones reached the chat, and the fourth attempt ended the run.
     const published = messages
       .flatMap((message) => message.blocks)
       .flatMap((block) => (block.kind === "text" ? [block.text] : []))
       .join("\n");
-    for (const refused of ["One.", "Two.", "Three.", "Four."])
+    for (const refused of ["Four.", "Five.", "Six.", "Seven."])
       expect(published).not.toContain(refused);
     expect(finalizeRun).toHaveBeenCalledOnce();
     const blocks = finalizeRun.mock.calls[0]![0].blocks;
