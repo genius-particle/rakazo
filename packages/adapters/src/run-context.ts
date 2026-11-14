@@ -181,6 +181,19 @@ export interface RunState {
    * call, so this counts what shape tracking cannot.
    */
   softRefusals: Map<string, number>;
+  /**
+   * How often `message_user` was refused for the opening-window rule alone ("no progress
+   * update in the first seconds of a turn"). Counted separately from `softRefusals` because
+   * this refusal clears itself with time — feeding the run-level streak would kill short
+   * runs before their answer is delivered. Two refusals mean the model ignored the
+   * "write it in your final reply" instruction twice, so the loop stops handing the call out.
+   */
+  progressWindowRefusals: number;
+  /**
+   * Whitespace-normalized texts `message_user` already posted this run. A second identical
+   * post is refused: the person has read it, and re-sending it is a retry in disguise.
+   */
+  postedProgressTexts: Set<string>;
   /** Consecutive `computer_act`/`browser_act` batches over the action limit, this one included. */
   overLimitActionCalls: number;
   /**

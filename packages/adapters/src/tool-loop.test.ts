@@ -9,6 +9,7 @@ import {
   MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS,
   MAX_CONSECUTIVE_SOFT_REFUSALS,
   overLimitStopText,
+  progressWindowStopText,
   softRefusalOf,
   softRefusalStopText,
   toolCallStreakLength,
@@ -437,5 +438,14 @@ describe("softRefusalStopText", () => {
     expect(isLoopGuardStopText(loopGuardStopText("Message user", { key: "k", count: 6 }))).toBe(
       true,
     );
+  });
+});
+
+describe("progressWindowStopText", () => {
+  it("names the window rule rather than a stuck call", () => {
+    const text = progressWindowStopText(60);
+    expect(text).toContain("not allowed in the first 60 seconds");
+    expect(text).toContain("refused that way twice");
+    expect(text).not.toContain("I got stuck calling");
   });
 });

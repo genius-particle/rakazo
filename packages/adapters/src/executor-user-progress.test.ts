@@ -816,9 +816,12 @@ describe("notes that can't be posted as messages", () => {
       return { result, sent: sentTexts(messages) };
     };
     // Nothing was sent, so the call is a failure the model cannot act on by sending again.
+    // The instruction the model must act on leads the text: one buried after the explanation
+    // was read as noise, and the same call came back unchanged.
     const notYet = expect.objectContaining({
       ok: false,
-      error: expect.stringContaining("put this content in your final reply instead"),
+      windowRefused: true,
+      error: expect.stringContaining("Do not call message_user again and do not retry"),
     });
     const stop = expect.objectContaining({
       ok: false,
@@ -894,6 +897,81 @@ describe("notes that can't be posted as messages", () => {
         text: expect.stringContaining("Message user with nothing sent 3 times in a row"),
       }),
     );
+  });
+
+  it("stops handing out message_user after two opening-window refusals", async () => {
+    // The first-seconds refusal clears itself with time, so it never feeds the run-level
+    // streak that kills short runs. But a model that ignored "write it in your final reply"
+    // twice will not deliver anything by trying a third time, so the turn guard stops the
+    // loop instead and the run finishes with what it streamed — not judged dead.
+    const { finalizeRun, messages } = await runTurn("", false, undefined, [], "fyi", {
+      trigger: "user",
+      runtime: async function* (request) {
+        for (const [index, text] of ["One.", "Two."].entries()) {
+          const executionId = `call-${index}`;
+          yield { type: "tool", name: "message_user", args: { message: text }, executionId };
+          const result = await request.executeTool!("message_user", { message: text }, executionId);
+          expect(result).toMatchObject({ ok: false, windowRefused: true });
+          // Not a terminal refusal: it must not feed the streak that ends short runs.
+          expect((result as { refused?: boolean }).refused).toBeUndefined();
+          expect((result as { error?: string }).error).toContain(
+            "Do not call message_user again and do not retry",
+          );
+        }
+        yield {
+          type: "tool",
+          name: "message_user",
+          args: { message: "Three." },
+          executionId: "call-3",
+        };
+        await request.executeTool!("message_user", { message: "Three." }, "call-3").catch(
+          () => undefined,
+        );
+        yield { type: "text", text: "Done." };
+        yield { type: "done", text: "" };
+      },
+    });
+    const published = messages
+      .flatMap((message) => message.blocks)
+      .flatMap((block) => (block.kind === "text" ? [block.text] : []))
+      .join("\n");
+    for (const refused of ["One.", "Two.", "Three."]) expect(published).not.toContain(refused);
+    expect(finalizeRun).toHaveBeenCalledOnce();
+    const blocks = finalizeRun.mock.calls[0]![0].blocks;
+    expect(blocks).toContainEqual(
+      expect.objectContaining({
+        kind: "text",
+        text: expect.stringContaining("Progress updates are not allowed in the first 60 seconds"),
+      }),
+    );
+  });
+
+  it("refuses an identical message_user post instead of sending it twice", async () => {
+    // The person already read the first one. Whitespace differences do not make it new.
+    const longTurn = new Date(Date.now() - 120_000);
+    const { messages } = await runTurn("", false, undefined, [], "fyi", {
+      startedAt: longTurn,
+      trigger: "user",
+      runtime: async function* (request) {
+        const texts = ["Hello there.", "Hello  there."];
+        for (const [index, text] of texts.entries()) {
+          const executionId = `call-${index}`;
+          yield { type: "tool", name: "message_user", args: { message: text }, executionId };
+          const result = await request.executeTool!("message_user", { message: text }, executionId);
+          if (index === 0) expect(result).toMatchObject({ ok: true });
+          else
+            expect(result).toMatchObject({
+              ok: false,
+              refused: true,
+              error: expect.stringContaining("already posted above"),
+            });
+        }
+        yield { type: "text", text: "Done." };
+        yield { type: "done", text: "" };
+      },
+    });
+    const sent = sentTexts(messages);
+    expect(sent.filter((text) => text.replace(/\s+/g, " ") === "Hello there.").length).toBe(1);
   });
 
   it("posts one heads-up at once once a fresh turn calls a browser or desktop tool", async () => {

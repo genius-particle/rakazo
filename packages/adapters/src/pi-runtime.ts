@@ -316,15 +316,18 @@ export class PiAgentRuntime implements AgentRuntime {
         const toolsByAgentName = agentToolDefinitions(toolDefs);
         // Claim→Receipt 守卫：按工具名记账（挡住「调了 message_user 却声称 message_bot ok」）
         // P2：成功派单回执附带目标 botId，收工前核对对方是否真有 bot_message 新 run。
+        // error 只在失败回执上留一条截断原因，收尾的事实记账会引用它。
         type ToolReceipt = {
           name: string;
           ok: boolean;
           at: number;
           targets?: Array<{ botId: string; name?: string }>;
+          error?: string;
         };
         const toolReceiptsThisRun: ToolReceipt[] = [];
         let claimGuardFired = false;
         let dispatchGateFired = false;
+        let ledgerDirty = false;
         const countedTools = allTools.map((tool) => ({
           ...tool,
           execute: async (...args: unknown[]) => {
@@ -333,11 +336,14 @@ export class PiAgentRuntime implements AgentRuntime {
               toolName: string,
               ok: boolean,
               targets?: Array<{ botId: string; name?: string }>,
+              error?: string,
             ) => {
               const at = Date.now();
               const entry: ToolReceipt = { name: toolName, ok, at };
               if (targets?.length) entry.targets = targets;
+              if (error) entry.error = error;
               toolReceiptsThisRun.push(entry);
+              ledgerDirty = true;
               // find_tool→use_tool 包装：同时记内层工具名，否则 DISPATCH_CLAIM 认不到
               // relay_to_bots / message_bot 的成功回执。
               if (toolName === "use_tool") {
@@ -379,10 +385,21 @@ export class PiAgentRuntime implements AgentRuntime {
                 }
               }
               const targets = ok ? extractDispatchTargets(name, args[1], result) : [];
-              recordReceipt(name, ok, targets.length ? targets : undefined);
+              let error: string | undefined;
+              if (!ok && result && typeof result === "object") {
+                const r = result as { error?: unknown; details?: { error?: unknown } };
+                const raw = r.error ?? r.details?.error;
+                if (typeof raw === "string" && raw.trim()) error = raw.trim().slice(0, 160);
+              }
+              recordReceipt(name, ok, targets.length ? targets : undefined, error);
               return result;
             } catch (err) {
-              recordReceipt(name, false);
+              recordReceipt(
+                name,
+                false,
+                undefined,
+                (err instanceof Error ? err.message : String(err)).trim().slice(0, 160),
+              );
               throw err;
             }
           },
@@ -786,13 +803,30 @@ export class PiAgentRuntime implements AgentRuntime {
                   ),
                 }
               : undefined;
-            if (!request.claimSteering) return update;
+            // 事实记账：上一轮产生了新的工具回执时，把最新记账放进下一轮请求——最终回复
+            // 生成时它已在场，不额外花费模型调用；上一条记账从会话里剔除，避免堆积。
+            const injectLedger = ledgerDirty && toolReceiptsThisRun.length > 0;
+            const ledgerMessage = injectLedger
+              ? {
+                  role: "user" as const,
+                  content: stepsLedgerNote(toolReceiptsThisRun),
+                  timestamp: Date.now(),
+                }
+              : undefined;
+            if (injectLedger) ledgerDirty = false;
+            if (!request.claimSteering) {
+              if (!ledgerMessage) return update;
+              return { ...withLedgerReplaced(update, turn), messages: [ledgerMessage] };
+            }
             // The turn is ending at a terminating result that aborted the agent; no
             // model request would answer a follow-up claimed now, and a completed run
             // deletes its claimed steering. Leave the message queued for the next run.
             if (terminatedReply && !host.pausePending) return update;
             const steering = await request.claimSteering([...seenSteeringIds]);
-            if (steering.length === 0) return update;
+            if (steering.length === 0) {
+              if (!ledgerMessage) return update;
+              return { ...withLedgerReplaced(update, turn), messages: [ledgerMessage] };
+            }
             seenSteeringIds.push(...steering.map((item) => item.id));
             for (const item of steering) representedHistoryIds.add(item.messageId);
             if (steering.some((item) => item.images?.length && !item.imageFileFallback))
@@ -820,7 +854,10 @@ export class PiAgentRuntime implements AgentRuntime {
             // Returned rather than steered: Pi polls its steering queue once per turn before
             // this hook runs, and skips the poll after it when that one found a message, such
             // as a finished shell's output. Returned messages always go into the next request.
-            return { ...update, messages };
+            return {
+              ...withLedgerReplaced(update, turn),
+              messages: ledgerMessage ? [...messages, ledgerMessage] : messages,
+            };
           },
           initialState: {
             systemPrompt,
@@ -1411,7 +1448,6 @@ export class PiAgentRuntime implements AgentRuntime {
   }
 }
 
-
 // ---- Claim→Receipt 守卫（本地补丁） ----
 const CLAIM_RECEIPT_PATTERN =
   /已(发送|发出|通知|转告|转达|委托|派发|调用|执行|创建|删除|修改|写入|保存|回复|提交|上传|下载|重启|启动)|发送成功|执行成功|已经(发送|通知|转告|调用|执行)|has been sent|sent successfully|completed successfully|返回 ok|均返回 ok/i;
@@ -1545,4 +1581,66 @@ function lastAssistantTextFromTurn(turn: unknown): string {
     return "";
   }
   return "";
+}
+
+/** 事实记账注入消息的固定开头，替换上一条时按它识别。 */
+const LEDGER_NOTE_PREFIX = "【事实记账";
+
+/** 把上一条事实记账从会话消息里剔除，好让最新一条取而代之，避免堆积。 */
+function withoutPreviousLedger(context: { messages?: unknown } | undefined) {
+  if (!context || !Array.isArray(context.messages)) return context;
+  return {
+    ...context,
+    messages: context.messages.filter(
+      (message) =>
+        !(
+          message &&
+          typeof message === "object" &&
+          typeof (message as { content?: unknown }).content === "string" &&
+          String((message as { content?: unknown }).content).startsWith(LEDGER_NOTE_PREFIX)
+        ),
+    ),
+  };
+}
+
+/** 在下一轮请求的上下文里换上最新记账；原本没有 update 就地建一个，模型字段保持不变。 */
+function withLedgerReplaced(
+  update: Record<string, unknown> | undefined,
+  turn: { context?: { messages?: unknown } },
+): Record<string, unknown> {
+  const base = (update ?? { context: { ...(turn.context ?? {}) } }) as Record<string, unknown>;
+  const context = (base.context ?? {}) as { messages?: unknown };
+  base.context = withoutPreviousLedger(context) ?? context;
+  return base;
+}
+
+/**
+ * 本运行工具调用的真实记账，放进下一轮请求的上下文。只陈述发生了什么，不改写模型的回复；
+ * 目的是让「未发生的调用」无所遁形：表里没有的调用，模型不得声称已执行。
+ */
+export function stepsLedgerNote(
+  receipts: ReadonlyArray<{ name: string; ok: boolean; error?: string }>,
+): string {
+  const order: string[] = [];
+  const tally = new Map<string, { ok: number; failed: number; lastError?: string }>();
+  for (const receipt of receipts) {
+    let entry = tally.get(receipt.name);
+    if (!entry) {
+      entry = { ok: 0, failed: 0 };
+      tally.set(receipt.name, entry);
+      order.push(receipt.name);
+    }
+    if (receipt.ok) entry.ok += 1;
+    else {
+      entry.failed += 1;
+      if (receipt.error) entry.lastError = receipt.error;
+    }
+  }
+  const lines = order.map((name) => {
+    const entry = tally.get(name)!;
+    const reason =
+      entry.failed > 0 && entry.lastError ? `，最后一次失败原因：${entry.lastError}` : "";
+    return `- ${name} ×${entry.ok + entry.failed}（成功 ${entry.ok}、失败 ${entry.failed}${reason}）`;
+  });
+  return `【事实记账·以此为准】本运行真实发生的工具调用如下：\n${lines.join("\n")}\n上表之外没有任何工具调用：没有列出的调用一律未发生，不要声称已执行、已成功、已发送或已收到回复；与上表矛盾的说法请以上表为准改口。`;
 }

@@ -55,6 +55,14 @@ export const STEERING_RESET_MIN_GAP_MS = 60_000;
 export const MID_TURN_PROGRESS_MAX_PER_RUN = 3;
 
 /**
+ * Opening-window refusals of message_user tolerated before the turn guard stops handing the
+ * call out and asks for the final reply instead. Counted apart from the run-level refusal
+ * streak: this refusal clears itself with time, so ending a short run on it would deliver
+ * nothing. Two mean the model ignored "write it in your final reply" twice in a row.
+ */
+export const MID_TURN_PROGRESS_WINDOW_REFUSALS = 2;
+
+/**
  * Whether the run may post another durable interim chat message right now.
  * Short turns stay silent in durable chat; long turns keep a few replyable
  * beats without flooding the thread.

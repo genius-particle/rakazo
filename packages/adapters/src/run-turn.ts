@@ -102,6 +102,7 @@ import {
   MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS,
   MAX_CONSECUTIVE_SOFT_REFUSALS,
   overLimitStopText,
+  progressWindowStopText,
   softRefusalStopText,
   toolResultFingerprint,
 } from "./tool-loop.js";
@@ -111,6 +112,8 @@ import {
   clampUserProgressMessage,
   extractNarrationText,
   finalBlocksAfterMidTurnProgress,
+  MID_TURN_PROGRESS_MIN_TURN_AGE_MS,
+  MID_TURN_PROGRESS_WINDOW_REFUSALS,
   STEERING_RESET_MIN_GAP_MS,
   STEERING_RESETS_MAX_PER_RUN,
   USER_PROGRESS_MESSAGE_MAX_LENGTH,
@@ -569,15 +572,27 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
   // matter how the arguments read. This is what shape counting cannot see.
   const refusals = ctx.state.softRefusals?.get(event.name) ?? 0;
   const stuckOnRefusal = refusals >= MAX_CONSECUTIVE_SOFT_REFUSALS;
+  // Two opening-window refusals mean the model ignored "write it in your final reply" twice.
+  // Handing message_user out a third time only teaches it to try a fourth time, so the loop
+  // stops here and the run finishes with what it streamed. This is not the stuck-loop death:
+  // the refusal was the clock, the reply still goes out, and the person can simply ask again.
+  const windowStopDue =
+    event.name === "message_user" &&
+    (ctx.state.progressWindowRefusals ?? 0) >= MID_TURN_PROGRESS_WINDOW_REFUSALS;
   if (
     loopGuard.stuck ||
     stuckOnRefusal ||
+    windowStopDue ||
     ctx.state.overLimitActionCalls >= MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS
   ) {
     await stopStuckToolLoop(
       ctx,
       event.name,
-      stuckOnRefusal && !loopGuard.stuck ? "softRefusal" : undefined,
+      windowStopDue
+        ? "progressWindow"
+        : stuckOnRefusal && !loopGuard.stuck
+          ? "softRefusal"
+          : undefined,
     );
     return true;
   }
@@ -613,7 +628,11 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
 }
 
 /** The model keeps repeating the same call: finish the run with what it has and say why. */
-async function stopStuckToolLoop(ctx: RunContext, toolName: string, reason?: "softRefusal") {
+async function stopStuckToolLoop(
+  ctx: RunContext,
+  toolName: string,
+  reason?: "softRefusal" | "progressWindow",
+) {
   const { deps, run, runId, bot, thread, workerId, fence } = ctx;
   const { reply } = ctx.state;
   // Otherwise the model keeps calling tools while the stop is saved. The run's own signal stays
@@ -634,9 +653,11 @@ async function stopStuckToolLoop(ctx: RunContext, toolName: string, reason?: "so
   const stuckText =
     overLimit >= MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS
       ? overLimitStopText(humanName, overLimit)
-      : reason === "softRefusal"
-        ? softRefusalStopText(humanName, ctx.state.softRefusals?.get(toolName) ?? 0)
-        : loopGuardStopText(humanName, ctx.state.toolCallStreak);
+      : reason === "progressWindow"
+        ? progressWindowStopText(MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000)
+        : reason === "softRefusal"
+          ? softRefusalStopText(humanName, ctx.state.softRefusals?.get(toolName) ?? 0)
+          : loopGuardStopText(humanName, ctx.state.toolCallStreak);
   await ctx.settleRunningHelpers();
   const stopped = await deps.events.finalizeRun({
     spaceId: run.spaceId,

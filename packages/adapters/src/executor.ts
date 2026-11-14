@@ -1386,6 +1386,8 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           overLimitActionCalls: 0,
           toolResults: new Map(),
           softRefusals: new Map(),
+          progressWindowRefusals: 0,
+          postedProgressTexts: new Set(),
           tainted: initiallyTainted,
           ownerSettingsRefused: false,
           // A resumed turn replaces this with the baseline its saved prompt was built from.

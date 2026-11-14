@@ -37,6 +37,7 @@ import {
   isProgressMessageTruncated,
   MID_TURN_PROGRESS_MAX_PER_RUN,
   MID_TURN_PROGRESS_MIN_TURN_AGE_MS,
+  MID_TURN_PROGRESS_WINDOW_REFUSALS,
   messageUserMaxLength,
   midTurnProgressBudgetUsed,
 } from "./user-progress.js";
@@ -386,6 +387,18 @@ export const messagingTools: ToolHandlers = {
     const text = clampUserProgressMessage(rawMessage, maxLength);
     if (!text) return call.finish({ error: "message is required" });
     const truncated = isProgressMessageTruncated(rawMessage, maxLength);
+    // The person already read what was posted. A second identical post — however it is
+    // spaced — is a retry wearing a new coat, so refuse it like one.
+    ctx.state.postedProgressTexts ??= new Set();
+    const postedKey = text.replace(/\s+/g, " ").trim();
+    if (ctx.state.postedProgressTexts.has(postedKey)) {
+      return call.finish({
+        ok: false,
+        refused: true,
+        error:
+          "This exact message was already posted above in this run. Do not send it again and do not retry.",
+      });
+    }
     await flushProgress(ctx);
     // Text written before an answer to the person's mid-task message doesn't use up the
     // allowance meant for that answer.
@@ -406,17 +419,32 @@ export const messagingTools: ToolHandlers = {
       // Only a spent budget is final: no later call in this run can post anything. The
       // first-seconds refusal clears itself with time, so it must not feed the run-level streak
       // that ends the turn — a run that finishes in under a minute would be stopped with its
-      // answer never delivered.
+      // answer never delivered. It gets its own counter instead: two refusals mean the model
+      // ignored the "write it in your final reply" instruction twice, and the turn guard stops
+      // handing the call out.
       const budgetUsed = midTurnProgressBudgetUsed(progressSinceBudgetStart(reply));
+      if (budgetUsed) {
+        return call.finish({
+          ok: false,
+          refused: true,
+          error: `Progress budget for this run is used up (${MID_TURN_PROGRESS_MAX_PER_RUN}/${MID_TURN_PROGRESS_MAX_PER_RUN}). Nothing was sent and retrying will not help. Put the remaining content in your final reply.`,
+        });
+      }
+      // The instruction the model must act on comes first: an instruction buried after the
+      // explanation was read as noise, and the call came back unchanged.
+      ctx.state.progressWindowRefusals = (ctx.state.progressWindowRefusals ?? 0) + 1;
+      const repeatRefusal = ctx.state.progressWindowRefusals > MID_TURN_PROGRESS_WINDOW_REFUSALS;
       return call.finish({
         ok: false,
-        ...(budgetUsed ? { refused: true } : {}),
-        error: budgetUsed
-          ? `Progress budget for this run is used up (${MID_TURN_PROGRESS_MAX_PER_RUN}/${MID_TURN_PROGRESS_MAX_PER_RUN}). Nothing was sent and retrying will not help. Put the remaining content in your final reply.`
-          : `Nothing was sent: no progress update can be posted in the first ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds of a turn. Do not retry this call — put this content in your final reply instead, where the person reads it.`,
+        windowRefused: true,
+        error: `Do not call message_user again and do not retry — write what you wanted to say into your final reply now. No progress update can be posted in the first ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds of a turn, so nothing was sent.${repeatRefusal ? " Every further call will be refused the same way." : ""}`,
       });
     }
     await publishInterimMessage(ctx, text, true);
+    // A send that gets through proves the call is working again, so the opening-window
+    // counter clears — the same rule the run-level refusal streak follows.
+    ctx.state.progressWindowRefusals = 0;
+    ctx.state.postedProgressTexts.add(postedKey);
     // The person already has this message; notes written before it are no longer a missing answer.
     if (ctx.replyMode === "messages") {
       reply.workingNotes.length = 0;

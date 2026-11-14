@@ -38,6 +38,16 @@ export function softRefusalStopText(toolName: string, count: number): string {
   return `${LOOP_GUARD_STOP_PREFIX}${toolName} with nothing sent ${count}${SOFT_REFUSAL_STOP_SUFFIX}`;
 }
 
+/**
+ * The turn guard stopped `message_user` after repeated opening-window refusals. Unlike the
+ * stuck loops above the run is not dead: the reply it publishes is what the bot streamed, and
+ * the person can simply ask again. The text says why nothing was posted instead of blaming a
+ * stuck call, because every refusal here was the clock, not the model.
+ */
+export function progressWindowStopText(seconds: number): string {
+  return `Progress updates are not allowed in the first ${seconds} seconds of a turn, and message_user was refused that way twice, so I stopped calling it and finished the turn with what I have. If my reply above is empty or incomplete, ask me and I will answer directly.`;
+}
+
 export function isLoopGuardStopText(text: string): boolean {
   return LOOP_GUARD_STOP_PATTERN.test(text) || SOFT_REFUSAL_STOP_PATTERN.test(text);
 }
