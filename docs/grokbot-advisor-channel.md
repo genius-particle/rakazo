@@ -126,10 +126,14 @@ through chat.
 - **Ask lifecycle**: rows in `grokbot_asks` are operational scratch
   (`pending`/`accepted` → `answered` / `expired` / `failed`). Truncating the
   table is safe; a reply whose row is gone gets `unknown_correlation`.
-- **Timeouts**: an async ask is delivered if a reply arrives within its
-  `expiresAt` (default 10 minutes); later replies are dropped. An explicit-wait
-  call returns `ok: false` when it times out and the ask expires; no run is left
-  waiting.
+- **Timeouts**: an explicit-wait call returns `ok: false` when it times out and
+  the ask expires; no run is left waiting. A reply that arrives **after** the
+  wait ended is not lost: nobody is polling the row any more, so it is appended
+  to the thread that asked (meta reads `顾问（…）答复（迟到）`) and the webhook
+  reports `resolved`. The grace window is 24 h
+  (`LATE_REPLY_GRACE_MS`); past that the row stays `expired` and the reply gets
+  `unknown_correlation`. Measured peer latency on the live channel is 16–25 s,
+  so any explicit `timeout_ms` below ~30 s will always expire.
 - **No files, no groups, no history**: questions and replies are text only, one
   1:1 thread per peer.
 

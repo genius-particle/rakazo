@@ -25,13 +25,26 @@ export interface GrokbotAnsweredAsk {
   botId: string;
   runId: string;
   question: string;
+  /** Set when the reply arrived after the waiter had already given up. */
+  late?: boolean;
 }
+
+/**
+ * How long after expiry a late reply is still worth delivering. A reply that
+ * lands minutes late is useful; one that lands next week is noise in a thread
+ * the conversation has long left.
+ */
+export const LATE_REPLY_GRACE_MS = 24 * 60 * 60 * 1000;
 
 export interface GrokbotAskStore {
   /**
    * Fill an open ask with the advisor's reply. Returns false when the
-   * correlation is unknown, already answered, or expired — the webhook then
-   * reports the drop to the advisor instead of silently swallowing it.
+   * correlation is unknown or already answered — the webhook then reports the
+   * drop to the advisor instead of silently swallowing it.
+   *
+   * A reply that arrives after expiry is not a miss: nobody is waiting on the
+   * row any more, but the thread that asked still is, so it is delivered there
+   * and reported as resolved (`late: true` in the callback).
    */
   resolveReply(correlation: string, reply: string): Promise<boolean>;
 }
@@ -52,6 +65,28 @@ export function createPrismaGrokbotAskStore(
   prisma: PrismaClient,
   options: GrokbotAskStoreOptions = {},
 ): GrokbotAskStore {
+  /** Hands a resolved reply to its thread. The row is already updated. */
+  async function deliver(
+    ask: { correlation: string; botId: string; runId: string; question: string },
+    reply: string,
+    late: boolean,
+  ): Promise<void> {
+    try {
+      await options.onAnswered?.(
+        {
+          correlation: ask.correlation,
+          botId: ask.botId,
+          runId: ask.runId,
+          question: ask.question,
+          ...(late ? { late: true } : {}),
+        },
+        reply,
+      );
+    } catch (error) {
+      getLogger().error("grokbot reply could not be delivered to its thread", error);
+    }
+  }
+
   return {
     async resolveReply(correlation: string, reply: string) {
       const row = await prisma.grokbotAsk.findFirst({
@@ -63,8 +98,8 @@ export function createPrismaGrokbotAskStore(
         select: { id: true, botId: true, runId: true, question: true, status: true },
       });
       if (!row) {
-        // A late reply to an expired ask is still a miss, but the row should
-        // stop looking open to anyone reading the table.
+        // A late reply to an expired ask is still a miss for the waiter, but the
+        // row should stop looking open to anyone reading the table.
         await prisma.grokbotAsk
           .updateMany({
             where: {
@@ -75,7 +110,26 @@ export function createPrismaGrokbotAskStore(
             data: { status: "expired" },
           })
           .catch(() => undefined);
-        return false;
+
+        // Nobody polls an expired row, so the thread is the only audience left.
+        // Dropping the answer here is what made a slow advisor look like a
+        // broken channel: the work was done and then thrown away.
+        const late = await prisma.grokbotAsk.findFirst({
+          where: {
+            correlation,
+            status: "expired",
+            expiresAt: { gt: new Date(Date.now() - LATE_REPLY_GRACE_MS) },
+          },
+          select: { id: true, botId: true, runId: true, question: true },
+        });
+        if (!late) return false;
+        const claimedLate = await prisma.grokbotAsk.updateMany({
+          where: { id: late.id, status: "expired" },
+          data: { status: "answered", reply, answeredAt: new Date() },
+        });
+        if (claimedLate.count === 0) return false;
+        await deliver(late, reply, true);
+        return true;
       }
       const updated = await prisma.grokbotAsk.updateMany({
         // The status is part of the key: two concurrent webhooks for the same
@@ -87,21 +141,7 @@ export function createPrismaGrokbotAskStore(
 
       // A blocking ask polls this row itself; a fire-and-forget ask has no
       // waiter, so the thread is told directly.
-      if (row.status === "accepted") {
-        try {
-          await options.onAnswered?.(
-            {
-              correlation,
-              botId: row.botId,
-              runId: row.runId,
-              question: row.question,
-            },
-            reply,
-          );
-        } catch (error) {
-          getLogger().error("grokbot reply could not be delivered to its thread", error);
-        }
-      }
+      if (row.status === "accepted") await deliver(row, reply, false);
       return true;
     },
   };

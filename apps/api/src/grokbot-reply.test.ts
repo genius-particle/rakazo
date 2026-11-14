@@ -75,6 +75,22 @@ describe("delivering an advisor reply into its thread", () => {
     expect(notify).toHaveBeenCalledWith("thread-1", 42);
   });
 
+  it("marks an answer that arrived after the wait had ended", async () => {
+    const { deliver } = setup();
+
+    await deliver({ ...ask, late: true }, "通道正常");
+
+    expect(db.createThreadMessageInTransaction).toHaveBeenCalledWith(
+      { tx: true },
+      expect.objectContaining({
+        blocks: [
+          { kind: "meta", text: "顾问（大娃）答复（迟到）" },
+          { kind: "text", text: "通道正常" },
+        ],
+      }),
+    );
+  });
+
   it("writes nothing for an empty answer", async () => {
     const { deliver, notify } = setup();
 

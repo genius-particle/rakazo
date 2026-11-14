@@ -38,7 +38,12 @@ export function createAdvisorReplyDelivery(deps: {
       return;
     }
     const blocks: MessageBlock[] = [
-      { kind: "meta", text: `顾问（${deps.peerLabel}）答复` },
+      {
+        kind: "meta",
+        // Keeping the same prefix for both cases lets one grep find every
+        // advisor answer, while the suffix tells the reader why it is late.
+        text: ask.late ? `顾问（${deps.peerLabel}）答复（迟到）` : `顾问（${deps.peerLabel}）答复`,
+      },
       { kind: "text", text },
     ];
     const { seq } = await deps.prisma.$transaction(async (tx) => {

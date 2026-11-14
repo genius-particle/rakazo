@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPrismaGrokbotAskStore, createGrokbotAsk } from "./ask-store.js";
+import { createGrokbotAsk, createPrismaGrokbotAskStore } from "./ask-store.js";
 
 type Row = {
   id: string;
@@ -28,10 +28,19 @@ function fakePrisma(initial: Row | null) {
       findFirst: async ({
         where,
       }: {
-        where: { correlation: string; status?: { in: string[] }; expiresAt?: { gt: Date } };
+        where: {
+          correlation: string;
+          status?: string | { in: string[] };
+          expiresAt?: { gt: Date };
+        };
       }) => {
         if (!row || row.correlation !== where.correlation) return null;
-        if (where.status && !where.status.in.includes(row.status)) return null;
+        const wanted = where.status
+          ? typeof where.status === "string"
+            ? [where.status]
+            : where.status.in
+          : null;
+        if (wanted && !wanted.includes(row.status)) return null;
         if (where.expiresAt?.gt && row.expiresAt.getTime() <= where.expiresAt.gt.getTime()) {
           return null;
         }
@@ -135,17 +144,42 @@ describe("grokbot ask store", () => {
     expect(onAnswered).not.toHaveBeenCalled();
   });
 
-  it("marks an expired ask expired and refuses its late reply", async () => {
-    const { prisma, row, updates } = fakePrisma(
+  it("delivers a reply that arrives after the waiter gave up", async () => {
+    const { prisma, row } = fakePrisma(
       openRow({ status: "accepted", expiresAt: new Date(Date.now() - 1_000) }),
     );
     const onAnswered = vi.fn(async () => undefined);
     const store = createPrismaGrokbotAskStore(prisma, { onAnswered });
 
-    await expect(store.resolveReply("re-abc", "too late")).resolves.toBe(false);
+    // The run stopped waiting 11 seconds ago; the answer is still worth having,
+    // so it goes to the thread instead of being thrown away.
+    await expect(store.resolveReply("re-abc", "too late but done")).resolves.toBe(true);
+    expect(row?.status).toBe("answered");
+    expect(row?.reply).toBe("too late but done");
+    expect(onAnswered).toHaveBeenCalledWith(
+      {
+        correlation: "re-abc",
+        botId: "bot_1",
+        runId: "run_1",
+        question: "should we ship?",
+        late: true,
+      },
+      "too late but done",
+    );
+  });
+
+  it("still refuses a reply that is days past the grace window", async () => {
+    const { prisma } = fakePrisma(
+      openRow({
+        status: "expired",
+        expiresAt: new Date(Date.now() - 25 * 60 * 60 * 1000),
+      }),
+    );
+    const onAnswered = vi.fn(async () => undefined);
+    const store = createPrismaGrokbotAskStore(prisma, { onAnswered });
+
+    await expect(store.resolveReply("re-abc", "ancient")).resolves.toBe(false);
     expect(onAnswered).not.toHaveBeenCalled();
-    expect(updates.at(-1)?.data).toEqual({ status: "expired" });
-    expect(row?.status).toBe("expired");
   });
 
   it("keeps the ask answered even when thread delivery throws", async () => {
