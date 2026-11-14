@@ -66,11 +66,14 @@ describe("built-in tool bridge", () => {
     // The previous 33_080 line was already broken before this work (6fb3de4 measured 33_115).
     // This change adds 67 bytes: the message_user / message_bot / relay_to_bots /
     // handoff_to_bot descriptions now say a refused send posted nothing and must not be retried.
-    // schedule_create's six oneOf branches still inline their prompt and blank-timing specs;
-    // sharing them through $defs was tried and reverted because the wire schema must keep the
-    // "null is allowed" wording visible to the model (release-watch-guidance asserts it).
-    // Doing that dedup properly means teaching the wire converters to inline $refs; it is the
-    // immediate follow-up, not part of this fix.
+    //
+    // Do not try to buy room back by sharing schedule_create's branch specs through $defs.
+    // That was tried and dropped, not deferred. One function already builds all six branches,
+    // so the copies exist only after JSON.stringify; keeping $ref on the wire hides the
+    // "null is allowed" wording the model needs (release-watch-guidance asserts it), and
+    // inlining the refs again saves no tokens. Measure definitionBytes before adding a tool or
+    // a description; if it goes over, raise this line deliberately rather than trimming a
+    // description another feature depends on.
     expect(definitionBytes(listed)).toBeLessThanOrEqual(33_200);
     expect(deferred.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["render_plot", "create_space", "generate_secret", "scratchpad_add"]),
