@@ -26,6 +26,9 @@ x-app-environment: &app-environment # Runtime
   OBJECT_STORAGE_PREFIX:
   OBJECT_STORAGE_PATH_STYLE:
   WAKEUP_DRIVER: graphile
+  # How often a running worker renews its leases; a stop is noticed on the next tick.
+  # Default 8000, clamped to 2000-30000 (packages/adapters/src/run-heartbeat.ts).
+  RAKAZO_RUN_HEARTBEAT_MS:
   AGENT_RUNTIME: pi
   API_URL:
   MAX_UPLOAD_SIZE_MB:

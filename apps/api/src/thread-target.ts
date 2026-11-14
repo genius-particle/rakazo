@@ -76,6 +76,22 @@ export type ThreadTarget =
 export const RUNS_NEEDING_CONTINUE = new Set(["queued", "waiting_takeover"]);
 
 const STEERABLE_RUN_STATUSES = new Set<string>(QUEUE_HOLDING_RUN_STATUSES);
+
+/**
+ * What the person sees the moment their message is accepted: before the worker holds a lease,
+ * before the model has produced a token. A 1:1 send otherwise sits silent for however long the
+ * queue and the first tool loop take. It is a progress row, not a message, so it never reaches
+ * the model's context, and the first flush replaces it outright (`text`, never `delta`).
+ *
+ * `activity` keeps it visible with response streaming off, which is the default: that setting
+ * strips streamed reply text from live rows but leaves the working line.
+ */
+const RUN_RECEIPT_PAYLOAD: Record<string, unknown> = {
+  text: "收到，正在处理…",
+  streaming: true,
+  activity: true,
+};
+
 /**
  * An answer steers the waiting run it resumes when the model must see its image, or when the run
  * reads no thread history and would otherwise never get the attachment.
@@ -536,6 +552,18 @@ export async function sendThreadMessage(
     throw new ORPCError("BAD_REQUEST", { message: "replyQuote requires replyToMessageId." });
   }
 
+  // Written in the send's own transaction: a rolled-back send leaves no receipt behind, and a
+  // stop in the same commit purges it with the run's other transient progress.
+  const appendRunReceipt = (tx: Prisma.TransactionClient, botId: string, runId: string) =>
+    appendEventInTransaction(tx, {
+      spaceId: actor.spaceId,
+      threadId: target.threadId,
+      botId,
+      type: "thread.progress",
+      runId,
+      payload: RUN_RECEIPT_PAYLOAD,
+    });
+
   const commit = () =>
     deps.prisma.$transaction(async (tx) => {
       // A Space being deleted takes no new turns; its lock comes before the group and thread rows.
@@ -796,7 +824,7 @@ export async function sendThreadMessage(
           botIds: [target.botId],
           keepRunIds: [run.id],
         });
-        const event = await appendEventInTransaction(tx, {
+        await appendEventInTransaction(tx, {
           spaceId: actor.spaceId,
           threadId: target.threadId,
           botId: target.botId,
@@ -815,7 +843,8 @@ export async function sendThreadMessage(
             replyPreview,
           },
         });
-        return { message, runs: [run], routineRuns, eventSeq: event.seq };
+        const receipt = await appendRunReceipt(tx, target.botId, run.id);
+        return { message, runs: [run], routineRuns, eventSeq: receipt.seq };
       }
 
       const members = await lockAndLoadGroupMembers(tx, actor, target);
@@ -997,11 +1026,12 @@ export async function sendThreadMessage(
       // The event names the bot of the run it carries, so clients pair them correctly.
       const eventBotId = ownRun?.botId ?? firstRun?.botId ?? targetBotIds[0];
       if (!eventBotId) throw new IsolationError("Group send did not resolve a target");
+      let createdRuns: typeof runs = [];
       if (firstRun) {
         if (ownRun) {
           await tx.message.update({ where: { id: message.id }, data: { runId: ownRun.id } });
         }
-        const createdRuns = runs.filter(
+        createdRuns = runs.filter(
           (run) => !activeByBotId.has(run.botId) && !answeredByBotId.has(run.botId),
         );
         if (createdRuns.length) {
@@ -1032,7 +1062,14 @@ export async function sendThreadMessage(
           replyPreview,
         },
       });
-      return { message, runs, routineRuns, eventSeq: event.seq };
+      let receiptSeq = event.seq;
+      // Each member this message started work for gets its own receipt, so the chat shows
+      // something for every bot it spoke to, not only the one the message is filed under.
+      // A message that named nobody may leave a member silent, so those get nothing to retract.
+      for (const run of namesNobody ? [] : createdRuns) {
+        receiptSeq = Math.max(receiptSeq, (await appendRunReceipt(tx, run.botId, run.id)).seq);
+      }
+      return { message, runs, routineRuns, eventSeq: receiptSeq };
     }, THREAD_LOCK_TRANSACTION_OPTIONS);
 
   const committed = await withTransactionRetry(commit).catch(async (error) => {

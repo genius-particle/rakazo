@@ -34,6 +34,17 @@ export function stoppedRoutineNote(routineName: string) {
   return `Stopped the routine "${routineName}".`;
 }
 
+/**
+ * The bot the "stopped" note is attributed to. A Direct chat has one; a group chat
+ * speaks as the member the stop button stood for. A stopped background helper
+ * says so on its own card, so it gets no note.
+ */
+function stopNoteFor(target: ThreadTarget): { botId: string } | undefined {
+  if (target.kind === "bot") return { botId: target.botId };
+  const botId = target.memberBotIds[0];
+  return botId ? { botId } : undefined;
+}
+
 export async function stopThreadRuns(
   deps: {
     prisma: PrismaClient;
@@ -46,7 +57,14 @@ export async function stopThreadRuns(
   helperMessageId?: string,
 ) {
   const stop = await deps.prisma.$transaction(
-    cancelThreadRuns(actor, target, undefined, helperMessageId),
+    // The worker only learns of the stop on its next lease renewal, and that abort is
+    // silent, so the note has to come from here for the person to see an answer.
+    cancelThreadRuns(
+      actor,
+      target,
+      helperMessageId ? undefined : stopNoteFor(target),
+      helperMessageId,
+    ),
     THREAD_LOCK_TRANSACTION_OPTIONS,
   );
   await finishThreadStop(deps, actor, target, stop);

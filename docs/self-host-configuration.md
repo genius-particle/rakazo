@@ -43,6 +43,7 @@ SCIM_BEARER_TOKEN=        # lets your identity provider add and remove accounts;
 SANDBOX_PROVIDER=docker   # or none, e2b, novita, daytona, createos, boat. Keep fake only for pnpm test.
 AGENT_RUNTIME=pi          # Keep scripted only for pnpm test.
 WAKEUP_DRIVER=graphile
+RAKAZO_RUN_HEARTBEAT_MS=8000  # lease renewal interval; a stop takes effect on the next one. Default 8000, clamped to 2000-30000
 SANDBOX_IDLE_MS=600000    # pause or stop after 10 minutes idle; 0 disables idle sleep
 # Set 0 when self-hosting with Docker, where an idle computer costs nothing, to keep long-running apps and sessions up.
 # E2B, CreateOS and Boat still apply their own timeouts.

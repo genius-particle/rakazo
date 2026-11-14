@@ -134,6 +134,7 @@ import type {
   RunState,
 } from "./run-context.js";
 import { restoreTurnCheckpointEffects, settleRunningHelpers } from "./run-context.js";
+import { runHeartbeatMs } from "./run-heartbeat.js";
 import { APPROVED_EFFECT_REPLAY_ORDER, buildApprovalContinuation } from "./run-effects.js";
 import {
   BOT_DIRECTORY_LIMIT,
@@ -473,7 +474,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
             lease.valid = false;
             runAbortController?.abort();
           });
-      }, 60_000);
+      }, runHeartbeatMs());
       heartbeat.unref?.();
       const stopHeartbeatAfterCompletion = () => {
         lease.completed = true;
