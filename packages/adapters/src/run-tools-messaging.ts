@@ -66,6 +66,17 @@ function advisorErrorText(error: unknown): string {
 }
 
 /**
+ * Whether the caller asked to block on the answer. Fire-and-forget is the
+ * default, so a caller opts in explicitly: `wait: true`, or a positive
+ * `timeout_ms` (which only makes sense when someone is waiting).
+ */
+export function advisorWaitRequested(args: Record<string, unknown>): boolean {
+  if (args.wait === true) return true;
+  const raw = Number(args.timeout_ms);
+  return Number.isFinite(raw) && raw > 0;
+}
+
+/**
  * Files a bot passes by path to another bot. A recipient on the same computer reads them
  * where they are. One elsewhere, or one that cannot be told apart, gets saved copies, filed
  * under the chat that shows them: its own, or the group's for a handoff. Every file is read
@@ -395,6 +406,7 @@ export const messagingTools: ToolHandlers = {
     if (!deps.sendToMessagingThread || !deps.advisorThreadId) {
       return call.finish({ error: "The advisor channel is not configured on this deployment." });
     }
+    const blocking = advisorWaitRequested(args);
     const timeoutMs = advisorTimeoutMs(args.timeout_ms);
     const body =
       question.length > ADVISOR_QUESTION_MAX
@@ -407,6 +419,7 @@ export const messagingTools: ToolHandlers = {
         runId: run.id,
         question: body,
         timeoutMs,
+        delivery: blocking ? "sync" : "async",
       }));
     } catch (error) {
       return call.finish({ error: `advisor ask setup failed: ${advisorErrorText(error)}` });
@@ -423,6 +436,16 @@ export const messagingTools: ToolHandlers = {
     } catch (error) {
       await failGrokbotAsk(deps.prisma, correlation).catch(() => undefined);
       return call.finish({ error: `advisor send failed: ${advisorErrorText(error)}` });
+    }
+    // Default: the question is out. The answer lands in this thread later, so
+    // this turn is free to carry on instead of spinning for minutes.
+    if (!blocking) {
+      return call.finish({
+        ok: true,
+        accepted: true,
+        correlation,
+        note: "Sent. This call does not wait for an answer: the advisor's reply will be posted into this thread when it arrives, usually minutes later. Do not call ask_grokbot again for this question, and do not keep the turn open for it — continue with what you can do now or end your turn.",
+      });
     }
     const reply = await waitGrokbotReply(deps.prisma, correlation, { signal: context.signal });
     if (reply === null) {

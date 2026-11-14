@@ -31,6 +31,17 @@ vi.mock("./run-tools-files.js", () => ({
   saveWorkspaceFile: mocks.saveWorkspaceFile,
 }));
 
+const grokbot = vi.hoisted(() => ({
+  createGrokbotAsk: vi.fn(async (..._args: unknown[]) => ({
+    correlation: "re-test",
+    expiresAt: new Date(Date.now() + 60_000),
+    delivery: "async" as const,
+  })),
+  failGrokbotAsk: vi.fn(async (..._args: unknown[]) => undefined),
+  waitGrokbotReply: vi.fn(async (..._args: unknown[]) => "advisor answer"),
+}));
+vi.mock("./grokbot/ask-store.js", () => grokbot);
+
 const { messagingTools } = await import("./run-tools-messaging.js");
 
 function callWith(name: string, args: Record<string, unknown>) {
@@ -315,5 +326,82 @@ describe("sending files to another bot", () => {
     ).resolves.toEqual({
       error: "site: not found, or your computer could not be read. Nothing was sent.",
     });
+  });
+});
+
+describe("asking the advisor", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  function advisorContext() {
+    const sendToMessagingThread = vi.fn(async (..._args: unknown[]) => ({ ok: true }));
+    const ctx = {
+      deps: { prisma: {}, sendToMessagingThread, advisorThreadId: "grokbot:dawa" },
+      run: { id: "run-1", spaceId: "space-1", userId: "user-1", threadId: "thread-1" },
+      bot: { id: "bot-coder", name: "Coder" },
+      thread: { id: "thread-1", groupId: null },
+      context: { signal: new AbortController().signal },
+      secrets: [],
+      state: {},
+    } as unknown as RunContext;
+    return { ctx, sendToMessagingThread };
+  }
+
+  it("returns as soon as the question is sent, without waiting for the advisor", async () => {
+    const { ctx, sendToMessagingThread } = advisorContext();
+    const result = await messagingTools.ask_grokbot!(
+      ctx,
+      callWith("ask_grokbot", { question: "should we ship?" }),
+    );
+
+    expect(result).toMatchObject({ ok: true, accepted: true, correlation: "re-test" });
+    expect(sendToMessagingThread).toHaveBeenCalledTimes(1);
+    expect(grokbot.createGrokbotAsk).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ delivery: "async" }),
+    );
+    expect(grokbot.waitGrokbotReply).not.toHaveBeenCalled();
+  });
+
+  it("blocks only when the caller asks to wait", async () => {
+    const { ctx } = advisorContext();
+    const result = await messagingTools.ask_grokbot!(
+      ctx,
+      callWith("ask_grokbot", { question: "should we ship?", wait: true }),
+    );
+
+    expect(result).toMatchObject({ ok: true, reply: "advisor answer" });
+    expect(grokbot.createGrokbotAsk).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ delivery: "sync" }),
+    );
+    expect(grokbot.waitGrokbotReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats an explicit timeout as a request to block", async () => {
+    const { ctx } = advisorContext();
+    await messagingTools.ask_grokbot!(
+      ctx,
+      callWith("ask_grokbot", { question: "should we ship?", timeout_ms: 30_000 }),
+    );
+
+    expect(grokbot.createGrokbotAsk).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ delivery: "sync" }),
+    );
+    expect(grokbot.waitGrokbotReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the ask when the send fails, leaving nothing open", async () => {
+    const { ctx } = advisorContext();
+    (ctx.deps.sendToMessagingThread as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error("advisor unreachable"),
+    );
+    const result = await messagingTools.ask_grokbot!(
+      ctx,
+      callWith("ask_grokbot", { question: "should we ship?" }),
+    );
+
+    expect(result).toEqual({ error: "advisor send failed: advisor unreachable" });
+    expect(grokbot.failGrokbotAsk).toHaveBeenCalledWith(expect.anything(), "re-test");
   });
 });

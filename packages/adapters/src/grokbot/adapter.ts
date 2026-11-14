@@ -1,11 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { getLogger } from "@rakazo/logging";
-import type {
-  Adapter,
-  AdapterPostableMessage,
-  FormattedContent,
-  WebhookOptions,
-} from "chat";
+import type { Adapter, AdapterPostableMessage, FormattedContent, WebhookOptions } from "chat";
 import { NotImplementedError, stringifyMarkdown } from "chat";
 import type { GrokbotAskStore } from "./ask-store.js";
 
@@ -14,8 +9,10 @@ import type { GrokbotAskStore } from "./ask-store.js";
  * questions POST to the advisor's routine webhook (大娃 on another Rakazo
  * deployment); the advisor's routine POSTs the reply back to this deployment's
  * `/api/v1/messaging/webhook/grokbot` with the inbound bearer. Replies resolve
- * pending `ask_grokbot` calls through the ask store, and nothing here creates
- * messaging runs — so the channel cannot echo, loop, or fan out on its own.
+ * open `ask_grokbot` calls through the ask store: a blocking ask hands the text
+ * back to its waiting run, a fire-and-forget ask has it appended to the thread
+ * that asked. Nothing here creates messaging runs — so the channel cannot echo,
+ * loop, or fan out on its own.
  */
 
 export const GROKBOT_PROVIDER = "grokbot";
@@ -112,7 +109,11 @@ function parseInbound(body: unknown): ParsedInbound {
   const raw = body as GrokbotInboundBody;
   const type = typeof raw.type === "string" && raw.type ? raw.type : "reply";
   const content = typeof raw.content === "string" ? raw.content : "";
-  if (type !== "status" && !content.trim()) return { ok: false, error: "content is required" };
+  // Status and acknowledgement frames carry no text by design; everything else
+  // must say something, or there is nothing to deliver.
+  if (type !== "status" && type !== "ack" && !content.trim()) {
+    return { ok: false, error: "content is required" };
+  }
   if (
     raw.correlation !== undefined &&
     typeof raw.correlation === "string" &&
@@ -198,8 +199,11 @@ export class GrokbotAdapter implements Adapter {
     if (!parsed.ok) return Response.json({ error: parsed.error }, { status: 400 });
     const event = parsed.value;
 
-    // Delivery statuses need no reply and no pushback of any kind.
-    if (event.type === "status") return Response.json({ ok: true, action: "ignored" });
+    // Delivery statuses and acknowledgements need no reply and no pushback of
+    // any kind; an ack carrying a correlation must not consume the ask.
+    if (event.type === "status" || event.type === "ack") {
+      return Response.json({ ok: true, action: "ignored" });
+    }
 
     // The only supported inbound: a reply tied to a pending ask. It fills the
     // waiting tool call directly — no messaging run, no identity, no echo.

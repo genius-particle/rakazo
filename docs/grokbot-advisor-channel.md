@@ -12,9 +12,28 @@ pipeline. One provider (`grokbot`), one tool (`ask_grokbot`).
 - **不是聊天，不是汇报**: nothing is mirrored to the advisor — no run
   transcripts, no routine outputs, no statuses. Only an explicit `ask_grokbot`
   question goes out, and only its reply comes back.
-- **回环不可能**: inbound replies resolve the pending ask *before* any run
+- **回环不可能**: inbound replies resolve the open ask *before* any run
   logic. No messaging run is created for them, no ack/receipt is pushed, and
-  anything uncorrelated or at hop ≥ 1 is dropped with a log line.
+  anything uncorrelated or at hop ≥ 1 is dropped with a log line. A reply for a
+  fire-and-forget ask is appended to the asking thread as a bot message — a
+  message write, never a new run, so it cannot become another question.
+
+## Async by default, blocking on request
+
+`ask_grokbot` is **fire-and-forget by default**: the call returns as soon as the
+question is posted, and the advisor's answer is written into the same thread
+when it arrives (marked 「顾问（大娃）答复」). The asking turn keeps working or
+ends; nobody waits minutes on the tool.
+
+A caller that genuinely cannot continue without the answer opts in explicitly —
+`wait: true`, or any positive `timeout_ms`. Only then does the tool poll the ask
+row, and only then does the reply come back as the tool result. A blocking ask
+that times out returns `ok: false` and leaves no run behind.
+
+| Mode | Ask row status | Who reads the reply |
+| --- | --- | --- |
+| default (async) | `accepted` | the API appends it to the asking thread |
+| explicit wait | `pending` | the polling tool call returns it |
 
 ## Environment (all three secrets required together)
 
@@ -26,7 +45,7 @@ pipeline. One provider (`grokbot`), one tool (`ask_grokbot`).
 | `MESSAGING_GROKBOT_ADDRESS` | Our wire label (default `rakazo`) |
 | `MESSAGING_GROKBOT_PEER_ADDRESS` | 大娃's wire label (default `dawa`) |
 | `MESSAGING_GROKBOT_PEER_LABEL` | 大娃's display label (default `大娃`) |
-| `MESSAGING_GROKBOT_REPLY_TIMEOUT_MS` | Default `ask_grokbot` wait cap (default 600000, max 1800000) |
+| `MESSAGING_GROKBOT_REPLY_TIMEOUT_MS` | Ask lifetime (default 600000, max 1800000). For an explicit-wait call it is also the longest wait; for a default async call it is how late a reply is still delivered |
 
 When the three secrets are set, `messagingPlatformsFromEnv` mounts the
 `grokbot` platform; `isMessagingSurfaceEnabled` then sees a non-empty platform
@@ -69,14 +88,15 @@ With no secrets, nothing mounts and the route stays a plain 404.
 
 Rules:
 
-1. `correlation` must be echoed verbatim; replies that match no pending ask are
-   dropped (`unknown_correlation`).
-2. `type: "status"` is accepted and ignored — never answered with a pushback.
+1. `correlation` must be echoed verbatim; replies that match no open ask
+   (`pending` or `accepted`) are dropped (`unknown_correlation`).
+2. `type: "status"` and `type: "ack"` are accepted and ignored — never answered
+   with a pushback, and an ack never consumes the ask it names.
 3. `hop >= 1` without a matching correlation is dropped (`hop_limit`).
 4. Uncorrelated posts (advisor-initiated topics) are dropped
    (`uncorrelated_not_supported`); the channel is pull-only by design.
 5. Non-200 replies from Rakazo mean "not delivered"; 大娃's routine may retry
-   the POST — duplicates are harmless because only one pending ask matches a
+   the POST — duplicates are harmless because only one open ask matches a
    correlation (`status` guard in the store).
 
 ## 大娃 side (the「Rakazo顾问通道」routine)
@@ -104,10 +124,12 @@ through chat.
   with the bearer and `{}` → JSON 400; the route must not be an HTML login page
   or a plain-text 404 (404 = runtime not mounted).
 - **Ask lifecycle**: rows in `grokbot_asks` are operational scratch
-  (pending → answered / expired / failed). Truncating the table is safe; a
-  reply whose row is gone gets `unknown_correlation`.
-- **Timeouts**: the tool waits up to `timeout_ms` (clamped 5s–30min), then
-  returns `ok: false` and the ask expires; a later reply is dropped.
+  (`pending`/`accepted` → `answered` / `expired` / `failed`). Truncating the
+  table is safe; a reply whose row is gone gets `unknown_correlation`.
+- **Timeouts**: an async ask is delivered if a reply arrives within its
+  `expiresAt` (default 10 minutes); later replies are dropped. An explicit-wait
+  call returns `ok: false` when it times out and the ask expires; no run is left
+  waiting.
 - **No files, no groups, no history**: questions and replies are text only, one
   1:1 thread per peer.
 

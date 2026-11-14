@@ -1912,7 +1912,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "ask_grokbot",
     description:
-      "Ask the senior advisor (大娃, an off-platform consultant webhook) a question and wait minutes for the reply. Only for what you cannot settle yourself: direction you cannot judge, an investigation that is stuck, or an arbitration only the advisor can make. Teammate bots are reached with message_bot / relay_to_bots instead; routine reporting never goes here. One self-contained question per call; the call blocks until the reply arrives or the timeout passes and returns it as reply.",
+      "Ask the senior advisor (大娃, an off-platform consultant webhook). Fire-and-forget by default: the call returns as soon as the question is sent, and the advisor's answer is posted into this thread later when it arrives — do not wait for it and do not call this tool again for the same question. Only pass wait:true (or an explicit timeout_ms) when you genuinely cannot continue without the answer; that blocks this turn until the reply arrives or the timeout passes. Use it only for what you cannot settle yourself: direction you cannot judge, an investigation that is stuck, or an arbitration only the advisor can make. Teammate bots are reached with message_bot / relay_to_bots instead; routine reporting never goes here. One self-contained question per call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1921,10 +1921,15 @@ export const builtinAgentTools: ConnectorTool[] = [
           description:
             "The question, with the context the advisor needs to answer it standalone (what you tried, the decision to make).",
         },
+        wait: {
+          type: "boolean",
+          description:
+            "Set true to block this turn until the advisor replies. Omit for the default fire-and-forget behaviour.",
+        },
         timeout_ms: {
           type: "number",
           description:
-            "Optional wait cap in milliseconds; default 600000, minimum 5000, maximum 1800000.",
+            "Passing a positive value here by itself switches the call to blocking mode and is the longest wait: default 600000, minimum 5000, maximum 1800000. For a fire-and-forget call it only bounds how late a reply is still accepted.",
         },
       },
       required: ["question"],

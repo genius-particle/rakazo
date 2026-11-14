@@ -144,6 +144,7 @@ import { configuredEmailProvider } from "./email.js";
 import { mountEmailInboundRoute } from "./email-inbound.js";
 import type { AppEnv } from "./env.js";
 import { loadEnv } from "./env.js";
+import { createAdvisorReplyDelivery } from "./grokbot-reply.js";
 import { healthRoutes } from "./health.js";
 import { homeRetentionSweep } from "./home-retention.js";
 import { startHourlySweep } from "./hourly-sweep.js";
@@ -394,8 +395,19 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
   // This process registers the inbound sink, so it must hold Telegram's getUpdates connection.
   const messagingPlatforms = messagingPlatformsFromEnv(env, {
     pollInboundMessages: true,
-    // The advisor channel resolves webhook replies against pending ask rows.
-    ...(env.grokbotInboundToken ? { grokbotAskStore: createPrismaGrokbotAskStore(prisma) } : {}),
+    // The advisor channel resolves webhook replies against open ask rows, and a
+    // fire-and-forget ask needs its answer appended to the thread that asked.
+    ...(env.grokbotInboundToken
+      ? {
+          grokbotAskStore: createPrismaGrokbotAskStore(prisma, {
+            onAnswered: createAdvisorReplyDelivery({
+              prisma,
+              events,
+              peerLabel: env.grokbotPeerLabel || "大娃",
+            }),
+          }),
+        }
+      : {}),
   }).filter((platform) => platform.provider !== "slack" || !env.slackClientId);
   const legacyMessaging =
     messagingOverride ??
