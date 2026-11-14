@@ -6,6 +6,7 @@ import {
   partitionTools,
   USE_TOOL,
 } from "./builtin-tool-bridge.js";
+import { parseConnectorToolArgs } from "./lazy-tool-catalog.js";
 import { describeToolActivity } from "./pi-runtime-tools.js";
 import { BUILTIN_AGENT_TOOL_NAMES, selectBuiltinToolsForRun } from "./run-tool-selection.js";
 
@@ -60,7 +61,17 @@ describe("built-in tool bridge", () => {
     // read_file takes a line range and says an image is read by path;
     // ask_user carries the content being decided about;
     // search_history lists earlier tool work by kind without a keyword.
-    expect(definitionBytes(listed)).toBeLessThanOrEqual(33_080);
+    //
+    // This number is an anti-bloat ratchet, not a model limit: it only says "do not grow".
+    // The previous 33_080 line was already broken before this work (6fb3de4 measured 33_115).
+    // This change adds 67 bytes: the message_user / message_bot / relay_to_bots /
+    // handoff_to_bot descriptions now say a refused send posted nothing and must not be retried.
+    // schedule_create's six oneOf branches still inline their prompt and blank-timing specs;
+    // sharing them through $defs was tried and reverted because the wire schema must keep the
+    // "null is allowed" wording visible to the model (release-watch-guidance asserts it).
+    // Doing that dedup properly means teaching the wire converters to inline $refs; it is the
+    // immediate follow-up, not part of this fix.
+    expect(definitionBytes(listed)).toBeLessThanOrEqual(33_200);
     expect(deferred.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["render_plot", "create_space", "generate_secret", "scratchpad_add"]),
     );
@@ -129,5 +140,39 @@ describe("built-in tool bridge", () => {
     expect(
       describeToolActivity(USE_TOOL, { name: "create_space", arguments: { name: "Finance" } }),
     ).toBe("Creating space: Finance");
+  });
+});
+
+// The six exclusive timing branches must stay honest: every method validates on its own,
+// blank leftovers still pass, and a real value in a second method still fails.
+describe("schedule_create timing branches", () => {
+  const schedule = ownerChat.find((tool) => tool.name === "schedule_create")!;
+  const check = (args: Record<string, unknown>) =>
+    parseConnectorToolArgs(schedule.inputSchema, args);
+  const base = { name: "Morning digest", prompt: "Send the list each morning." };
+
+  it("accepts each timing method", () => {
+    expect(() => check({ ...base, cron: "0 9 * * *" })).not.toThrow();
+    expect(() => check({ ...base, every: 2, unit: "hours" })).not.toThrow();
+    expect(() => check({ ...base, runAt: "2026-11-20T09:00" })).not.toThrow();
+    expect(() => check({ ...base, delayMinutes: 10 })).not.toThrow();
+    expect(() => check({ ...base, delaySeconds: 30 })).not.toThrow();
+    expect(() =>
+      check({ ...base, watch: { kind: "files", paths: ["/tmp/reports"] } }),
+    ).not.toThrow();
+  });
+
+  it("ignores null and blank leftovers in the other timing fields", () => {
+    expect(() =>
+      check({ ...base, cron: "0 9 * * *", every: null, unit: "", runAt: "", watch: null }),
+    ).not.toThrow();
+  });
+
+  it("rejects a real value in a second timing method", () => {
+    expect(() => check({ ...base, cron: "0 9 * * *", every: 2, unit: "hours" })).toThrow();
+  });
+
+  it("still rejects a property the branch does not declare", () => {
+    expect(() => check({ ...base, cron: "0 9 * * *", nope: true })).toThrow();
   });
 });
