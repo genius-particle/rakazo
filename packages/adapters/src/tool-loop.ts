@@ -11,6 +11,11 @@ const LOOP_GUARD_STOP_SUFFIX =
 const LOOP_GUARD_STOP_PATTERN = new RegExp(
   `^${LOOP_GUARD_STOP_PREFIX}.+${LOOP_GUARD_STOP_COUNT_PATTERN}\\d+${LOOP_GUARD_STOP_SUFFIX.replaceAll(".", "\\.")}$`,
 );
+const SOFT_REFUSAL_STOP_SUFFIX =
+  " times in a row without sending anything, so I stopped early. Those calls delivered nothing, and repeating them will not deliver it: put the content in your final reply, or take a different approach.";
+const SOFT_REFUSAL_STOP_PATTERN = new RegExp(
+  `^${LOOP_GUARD_STOP_PREFIX}.+ with nothing sent \\d+${SOFT_REFUSAL_STOP_SUFFIX.replaceAll(".", "\\.")}$`,
+);
 
 export function loopGuardStopText(toolName: string, streak: ToolCallStreak): string {
   // Short of the similar limit, only a repeated failure stops a run, and that is an identical one.
@@ -25,8 +30,46 @@ export function overLimitStopText(toolName: string, count: number): string {
   return `${LOOP_GUARD_STOP_PREFIX}${toolName} with too many actions ${count}${LOOP_GUARD_STOP_SUFFIX}`;
 }
 
+/**
+ * A tool that refused to send something this many times in a row is stuck, however differently
+ * it worded each attempt. Shape counting cannot see that: every reworded call is a new shape.
+ */
+export function softRefusalStopText(toolName: string, count: number): string {
+  return `${LOOP_GUARD_STOP_PREFIX}${toolName} with nothing sent ${count}${SOFT_REFUSAL_STOP_SUFFIX}`;
+}
+
 export function isLoopGuardStopText(text: string): boolean {
-  return LOOP_GUARD_STOP_PATTERN.test(text);
+  return LOOP_GUARD_STOP_PATTERN.test(text) || SOFT_REFUSAL_STOP_PATTERN.test(text);
+}
+
+/** Whether a finished call reports that it refused to act, rather than failing at an action. */
+export function softRefusalOf(result: unknown): boolean {
+  const payload = (result as { details?: unknown } | null)?.details ?? result;
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as { refused?: unknown }).refused === true;
+}
+
+/** Consecutive refusals of one tool trip the guard; a call that delivers clears its own count. */
+export const MAX_CONSECUTIVE_SOFT_REFUSALS = 3;
+
+/**
+ * Count refusals per tool name, never per argument. A refusal is the one signal that says
+ * "nothing was sent", and the calls that follow one differ in wording while delivering the same
+ * nothing — which is what shape counting cannot see. A send that gets through clears its count;
+ * other tools leave it alone, so a run that keeps retrying while doing other work still stops.
+ */
+export function countSoftRefusal(
+  refusals: Map<string, number>,
+  name: string,
+  refused: boolean,
+): { count: number; stuck: boolean } {
+  if (!refused) {
+    refusals.delete(name);
+    return { count: 0, stuck: false };
+  }
+  const count = (refusals.get(name) ?? 0) + 1;
+  refusals.set(name, count);
+  return { count, stuck: count >= MAX_CONSECUTIVE_SOFT_REFUSALS };
 }
 
 // Same tool, same arguments, failing this many times in a row means the agent is stuck.

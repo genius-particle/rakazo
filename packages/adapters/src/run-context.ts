@@ -176,6 +176,11 @@ export interface RunState {
   toolCallStreak: LoopGuardStreak;
   /** Result fingerprints of finished calls, read when the next call is tracked. */
   toolResults: Map<string, string>;
+  /**
+   * Consecutive refusals per tool name: a send that rewords its text is still the same stuck
+   * call, so this counts what shape tracking cannot.
+   */
+  softRefusals: Map<string, number>;
   /** Consecutive `computer_act`/`browser_act` batches over the action limit, this one included. */
   overLimitActionCalls: number;
   /**

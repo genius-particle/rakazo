@@ -43,17 +43,17 @@ export function filterBuiltinToolsForRun<T extends { name: string }>(
     : tools;
 }
 
-/** Keep cross-bot messaging thread-specific while exposing schedules in DMs and groups. */
+/**
+ * The tools a thread gets. Groups keep message_bot and relay_to_bots: a group used to drop them
+ * so a stage would be handed over rather than split into a private side thread, but that left
+ * message_user as the only way to say anything, and teammate-bound content went to the user
+ * instead. A group can still hand the stage over — it just is not the only route left.
+ */
 export function filterBuiltinToolsForThread<T extends { name: string }>(
   tools: T[],
-  groupId: string | null | undefined,
+  _groupId: string | null | undefined,
 ): T[] {
-  return tools.filter(
-    (tool) =>
-      // In a group the room is the shared surface: hand the stage to a member
-      // rather than starting a private thread off to one side.
-      !groupId || (tool.name !== "message_bot" && tool.name !== "relay_to_bots"),
-  );
+  return tools;
 }
 
 type ScheduleUnit = "minutes" | "hours" | "days" | "seconds";

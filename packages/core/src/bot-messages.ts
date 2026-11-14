@@ -15,6 +15,14 @@ export const BOT_MESSAGE_TOO_LONG = `message exceeds the ${BOT_MESSAGE_MAX_LENGT
  */
 export const DEFAULT_BOT_MESSAGE_MAX_HOPS = 6;
 
+/**
+ * The hop limit's refusal. It used to tell the sender to "report back to the user instead",
+ * which is exactly how teammate-bound content used to end up in the user's chat: the model
+ * followed the instruction. A chain that is too long simply ends.
+ */
+export const BOT_MESSAGE_HOP_EXHAUSTED =
+  "bot-to-bot message limit reached for this chain. Do not re-route this to the user: message_user and your final reply are not delivery routes to a teammate. End the chain and record the outcome in your scratchpad; write it in your final reply only if it also concerns the user.";
+
 /** The hop limit: `BOT_MESSAGE_MAX_HOPS` when it is a positive integer, else the default. */
 export function botMessageMaxHops(): number {
   const value = process.env.BOT_MESSAGE_MAX_HOPS?.trim();
@@ -60,20 +68,94 @@ export function botMessageAllowsSilence(
   return intent === "fyi" && !repliesToRequest;
 }
 
-/** Resolve a target by id first, then by exact name, then case-insensitively. */
+/**
+ * A name as compared: full-width characters folded to half-width, whitespace dropped, and
+ * lowercased. A model that writes "定 鼎" or "Ａｎａ" still names the bot.
+ */
+export function normalizeBotName(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/g, "").toLowerCase();
+}
+
+/** A prefix has to say something: one character matches too many names to route on. */
+const BOT_NAME_PREFIX_MIN_LENGTH = 2;
+
+/**
+ * Resolve a target by id, then by exact name, then by a name that differs only in case,
+ * width, or spacing, then by an unambiguous prefix. Anything else is left unresolved rather
+ * than guessed: the caller answers with the teammates it does have.
+ */
 export function resolveBotAddress<T extends BotAddress>(
   bots: readonly T[],
   input: { botId?: string; name?: string },
 ): T | undefined {
   const botId = input.botId?.trim();
-  if (botId) return bots.find((bot) => bot.id === botId);
-  const name = input.name?.trim();
-  if (!name) return undefined;
-  const exact = bots.find((bot) => bot.name === name);
+  if (botId) {
+    const byId = bots.find((bot) => bot.id === botId);
+    if (byId) return byId;
+    const looseId = bots.filter((bot) => normalizeBotName(bot.id) === normalizeBotName(botId));
+    if (looseId.length === 1) return looseId[0];
+  }
+  const raw = input.name?.trim();
+  if (!raw) return undefined;
+  const exact = bots.find((bot) => bot.name === raw);
   if (exact) return exact;
-  const lower = name.toLowerCase();
-  const matches = bots.filter((bot) => bot.name.toLowerCase() === lower);
-  return matches.length === 1 ? matches[0] : undefined;
+  const name = normalizeBotName(raw);
+  if (!name) return undefined;
+  const same = bots.filter((bot) => normalizeBotName(bot.name) === name);
+  if (same.length === 1) return same[0];
+  if (same.length > 1) return undefined;
+  if (name.length < BOT_NAME_PREFIX_MIN_LENGTH) return undefined;
+  const prefixed = bots.filter((bot) => normalizeBotName(bot.name).startsWith(name));
+  return prefixed.length === 1 ? prefixed[0] : undefined;
+}
+
+/** How many teammates a failed lookup lists back; the directory itself is never this long. */
+export const BOT_ADDRESS_CANDIDATE_LIMIT = 20;
+
+/**
+ * The teammates to offer when a target did not resolve, closest name first. A model that can
+ * see the roster picks the right one; one that sees only "no bot found" tends to give up and
+ * hand the content to the user instead.
+ */
+export function botAddressCandidates<T extends BotAddress>(
+  bots: readonly T[],
+  input: { botId?: string; name?: string },
+  limit = BOT_ADDRESS_CANDIDATE_LIMIT,
+): T[] {
+  const wanted = normalizeBotName(input.name ?? "");
+  const score = (bot: T): number => {
+    const name = normalizeBotName(bot.name);
+    if (!wanted) return 1;
+    if (name.startsWith(wanted)) return 3;
+    if (name.includes(wanted) || wanted.includes(name)) return 2;
+    return 1;
+  };
+  return [...bots]
+    .sort((a, b) => score(b) - score(a) || a.name.localeCompare(b.name))
+    .slice(0, limit);
+}
+
+/**
+ * The refusal for a target that did not resolve: what was asked for, the teammates there are,
+ * and the standing rule that the user is not a fallback address for a teammate.
+ */
+export function botAddressNotFoundError(
+  bots: readonly BotAddress[],
+  input: { botId?: string; name?: string },
+  limit = BOT_ADDRESS_CANDIDATE_LIMIT,
+): string {
+  const asked = [input.botId?.trim(), input.name?.trim()].filter(Boolean).join(" / ");
+  // Names and ids only: an error is not the place for the directory's descriptions.
+  const roster = formatBotRosterLines(
+    botAddressCandidates(bots, input, limit).map((bot) => ({ id: bot.id, name: bot.name })),
+  );
+  return [
+    `no bot found${asked ? ` for ${escapeDirectoryField(asked)}` : ""}. Nothing was sent.`,
+    roster.length
+      ? `Teammates you can address: ${roster.join(" ")}`
+      : "There are no other bots in this space that could receive it.",
+    "Retry with one of those ids or names. Do not send the message to the user instead.",
+  ].join(" ");
 }
 
 /**

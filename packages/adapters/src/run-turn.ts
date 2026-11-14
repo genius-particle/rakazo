@@ -100,7 +100,9 @@ import {
   advanceToolCallLoopGuard,
   loopGuardStopText,
   MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS,
+  MAX_CONSECUTIVE_SOFT_REFUSALS,
   overLimitStopText,
+  softRefusalStopText,
   toolResultFingerprint,
 } from "./tool-loop.js";
 import {
@@ -563,11 +565,20 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
     event.name,
     event.args,
   );
+  // The model is calling the tool that just refused it again: nothing will be delivered, no
+  // matter how the arguments read. This is what shape counting cannot see.
+  const refusals = ctx.state.softRefusals?.get(event.name) ?? 0;
+  const stuckOnRefusal = refusals >= MAX_CONSECUTIVE_SOFT_REFUSALS;
   if (
     loopGuard.stuck ||
+    stuckOnRefusal ||
     ctx.state.overLimitActionCalls >= MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS
   ) {
-    await stopStuckToolLoop(ctx, event.name);
+    await stopStuckToolLoop(
+      ctx,
+      event.name,
+      stuckOnRefusal && !loopGuard.stuck ? "softRefusal" : undefined,
+    );
     return true;
   }
   if (!ctx.scripted) return false;
@@ -602,7 +613,7 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
 }
 
 /** The model keeps repeating the same call: finish the run with what it has and say why. */
-async function stopStuckToolLoop(ctx: RunContext, toolName: string) {
+async function stopStuckToolLoop(ctx: RunContext, toolName: string, reason?: "softRefusal") {
   const { deps, run, runId, bot, thread, workerId, fence } = ctx;
   const { reply } = ctx.state;
   // Otherwise the model keeps calling tools while the stop is saved. The run's own signal stays
@@ -623,7 +634,9 @@ async function stopStuckToolLoop(ctx: RunContext, toolName: string) {
   const stuckText =
     overLimit >= MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS
       ? overLimitStopText(humanName, overLimit)
-      : loopGuardStopText(humanName, ctx.state.toolCallStreak);
+      : reason === "softRefusal"
+        ? softRefusalStopText(humanName, ctx.state.softRefusals?.get(toolName) ?? 0)
+        : loopGuardStopText(humanName, ctx.state.toolCallStreak);
   await ctx.settleRunningHelpers();
   const stopped = await deps.events.finalizeRun({
     spaceId: run.spaceId,

@@ -3,7 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   BOT_DELIBERATION_GUIDANCE,
   BOT_DIRECTORY_DESCRIPTIONS_MAX_LENGTH,
+  BOT_MESSAGE_HOP_EXHAUSTED,
   BOT_MESSAGE_MAX_LENGTH,
+  botAddressCandidates,
+  botAddressNotFoundError,
   botMessageAllowsSilence,
   botMessageHopExhausted,
   botMessageMaxHops,
@@ -121,6 +124,14 @@ describe("hop bounding", () => {
     }
     expect(delivered).toBe(DEFAULT_BOT_MESSAGE_MAX_HOPS);
   });
+
+  it("ends an exhausted chain without routing it to the user", () => {
+    expect(BOT_MESSAGE_HOP_EXHAUSTED).toContain("limit reached");
+    expect(BOT_MESSAGE_HOP_EXHAUSTED).toContain("Do not re-route this to the user");
+    expect(BOT_MESSAGE_HOP_EXHAUSTED).toContain("End the chain");
+    // The words that used to send teammate content into the user's chat.
+    expect(BOT_MESSAGE_HOP_EXHAUSTED).not.toContain("report back to the user");
+  });
 });
 
 describe("addressing", () => {
@@ -149,6 +160,45 @@ describe("addressing", () => {
   it("returns nothing for an unknown target", () => {
     expect(resolveBotAddress(bots, { botId: "b_404" })).toBeUndefined();
     expect(resolveBotAddress(bots, {})).toBeUndefined();
+  });
+
+  it("matches a name typed with other width and spacing", () => {
+    const cjk = [
+      { id: "b_1", name: "定鼎" },
+      { id: "b_2", name: "稳固" },
+    ];
+    expect(resolveBotAddress(cjk, { name: " 定 鼎 " })?.id).toBe("b_1");
+    expect(resolveBotAddress(cjk, { name: "稳固" })?.id).toBe("b_2");
+    const latin = [{ id: "b_3", name: "Ａｎａ" }];
+    expect(resolveBotAddress(latin, { name: "ana" })?.id).toBe("b_3");
+  });
+
+  it("matches an unambiguous prefix, and refuses one that names two bots", () => {
+    const named = [
+      { id: "b_1", name: "Researcher" },
+      { id: "b_2", name: "Research-ops" },
+      { id: "b_3", name: "Analyst" },
+    ];
+    expect(resolveBotAddress(named, { name: "analy" })?.id).toBe("b_3");
+    expect(resolveBotAddress(named, { name: "resear" })).toBeUndefined();
+    // A single character says too little to route on.
+    expect(resolveBotAddress(named, { name: "a" })).toBeUndefined();
+  });
+
+  it("lists the teammates to choose from when a target does not resolve", () => {
+    const roster = [
+      { id: "b_2", name: "Analyst" },
+      { id: "b_3", name: "Analytics" },
+      { id: "b_1", name: "Researcher" },
+    ];
+    const error = botAddressNotFoundError(roster, { name: "Analist" });
+    expect(error).toContain("Nothing was sent");
+    // The closest names come first, and every id is there to retry with.
+    expect(error).toContain("Analyst (id: b_2)");
+    expect(error).toContain("Researcher (id: b_1)");
+    expect(error).toContain("Do not send the message to the user instead");
+    expect(error.indexOf("Analyst (id: b_2)")).toBeLessThan(error.indexOf("Researcher (id: b_1)"));
+    expect(botAddressCandidates(roster, { name: "Analist" })[0]?.name).toBe("Analyst");
   });
 });
 

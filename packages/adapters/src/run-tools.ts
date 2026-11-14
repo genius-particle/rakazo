@@ -36,6 +36,7 @@ import {
   userComputerShell,
 } from "./run-tools-user-computer.js";
 import { strategicInitiativeToolAllowed } from "./strategic-initiative.js";
+import { countSoftRefusal, softRefusalOf } from "./tool-loop.js";
 import { argumentGiven } from "./update-bot-patch.js";
 
 const TOOL_HANDLERS = new Map<string, ToolHandler>([
@@ -85,7 +86,12 @@ export async function applyTool(
     args = own;
   }
   try {
-    return await dispatchTool(ctx, name, args, executionId, observer);
+    const result = await dispatchTool(ctx, name, args, executionId, observer);
+    // Every call of every runtime funnels through here, so a tool that refused to act is
+    // counted by name — the arguments of the retry that follows differ, the refusal does not.
+    ctx.state.softRefusals ??= new Map();
+    countSoftRefusal(ctx.state.softRefusals, name, softRefusalOf(result));
+    return result;
   } finally {
     // Editing its own profile returns only what this run wrote; a child's profile is another bot's.
     const ownProfile = name === "update_bot" && !argumentGiven(args.bot_id);

@@ -621,7 +621,7 @@ export const builtinAgentTools: ConnectorTool[] = [
     name: "message_user",
     // Read lazily: the cap comes from process.env, which may be filled after import.
     get description() {
-      return `Post a short progress update to the user in this chat immediately. Does not end your turn. Use sparingly during long work for high-signal beats (what you are checking, then a result). Do not dump tool logs, thinking, or a play-by-play of every call. HARD LIMIT: cut off silently at ${messageUserMaxLength()} characters, so never put your final answer, a report, or any long-form content here \u2014 it will arrive mangled and the user will never see the rest. Always write your complete final answer in your normal reply, not here.`;
+      return `Post a short progress update to the user now. Does not end your turn. Use sparingly, for high-signal beats only \u2014 no tool logs or play-by-play. HARD LIMIT: cut off silently at ${messageUserMaxLength()} characters, so never put your final answer or long-form content here: it arrives mangled. Write the complete answer in your normal reply, not here. Only the user reads this; a teammate is reached with message_bot or relay_to_bots. A call that comes back ok:false posted nothing and says why: that refusal is final, so do not retry it, reworded or not \u2014 put the content in your final reply.`;
     },
     get inputSchema() {
       return {
@@ -1829,7 +1829,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "message_bot",
     description:
-      'Send a useful update, question, or result to another of the user\'s bots. You must call this tool to actually deliver it — writing the message in your own reply text (e.g. "[to Comms] ...") does not send anything and the recipient never sees it. Delivery is async and does not end your turn. Continue independent work; do not poll or send ack-only messages. Later updates only if they add something new.',
+      'Send a useful update, question, or result to another of the user\'s bots. This is the delivery route to a teammate: you must call it, because writing the message in your own reply text (e.g. "[to Comms] ...") or sending it to the user with message_user does not reach the recipient. Delivery is async and does not end your turn. Continue independent work; do not poll or send ack-only messages. Later updates only if they add something new. A name that does not resolve comes back with the teammates you can address — pick one from that list and retry; never hand teammate-bound content to the user instead. A call that comes back ok:false delivered nothing, and repeating the same send with different wording will not deliver it either. Inside a group this still reaches one member privately, by id or exact name; handoff_to_bot is for moving the stage into the group, not the only way to reach a teammate.',
     inputSchema: {
       type: "object",
       properties: {
@@ -1861,7 +1861,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "relay_to_bots",
     description:
-      "Send the same message to multiple of the user's bots in one call (sequential delivery). You must call this tool to actually deliver — writing the message in your reply text does not send anything. Overall ok is true only when every target was delivered; on partial failure the result lists which succeeded and which failed so you can retry failed ones with message_bot. Delivery is async and does not end your turn. Prefer this over multiple message_bot calls when the same text goes to several teammates.",
+      "Send the same message to multiple of the user's bots in one call (sequential delivery). You must call this tool to actually deliver — writing the message in your reply text does not send anything, and message_user reaches the user, not a teammate. Overall ok is true only when every target was delivered; on partial failure the result lists which succeeded and which failed so you can retry failed ones with message_bot. Targets that do not resolve come back with the teammates you can address. Delivery is async and does not end your turn. Prefer this over multiple message_bot calls when the same text goes to several teammates.",
     inputSchema: {
       type: "object",
       properties: {

@@ -3,10 +3,14 @@ import { observationToolResult } from "./computer-tools.js";
 import {
   advanceOverLimitActionCalls,
   advanceToolCallLoopGuard,
+  countSoftRefusal,
   isLoopGuardStopText,
   loopGuardStopText,
   MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS,
+  MAX_CONSECUTIVE_SOFT_REFUSALS,
   overLimitStopText,
+  softRefusalOf,
+  softRefusalStopText,
   toolCallStreakLength,
   toolResultFingerprint,
 } from "./tool-loop.js";
@@ -380,5 +384,58 @@ describe("overLimitStopText", () => {
     expect(text).toContain("with too many actions 4 times in a row");
     expect(text).not.toContain("same input");
     expect(isLoopGuardStopText(text)).toBe(true);
+  });
+});
+
+describe("countSoftRefusal", () => {
+  it("stops a tool refused three times, however differently each call is worded", () => {
+    const refusals = new Map<string, number>();
+    const results = ["deploy it", "deploy the app", "shipping it now"].map(
+      // Each attempt sends a different body, so no shape counter can see the repeat.
+      () => countSoftRefusal(refusals, "message_bot", true),
+    );
+    expect(results.map((result) => result.stuck)).toEqual([false, false, true]);
+    expect(refusals.get("message_bot")).toBe(MAX_CONSECUTIVE_SOFT_REFUSALS);
+  });
+
+  it("needs three in a row: a send that gets through clears the count", () => {
+    const refusals = new Map<string, number>();
+    countSoftRefusal(refusals, "message_user", true);
+    countSoftRefusal(refusals, "message_user", true);
+    expect(countSoftRefusal(refusals, "message_user", true).stuck).toBe(true);
+    expect(countSoftRefusal(refusals, "message_user", false).stuck).toBe(false);
+    expect(refusals.has("message_user")).toBe(false);
+    expect(countSoftRefusal(refusals, "message_user", true).stuck).toBe(false);
+  });
+
+  it("counts per tool, so other work between the retries does not hide them", () => {
+    const refusals = new Map<string, number>();
+    countSoftRefusal(refusals, "message_user", true);
+    // Reading a file is not this tool delivering, so its count stands.
+    countSoftRefusal(refusals, "read_file", false);
+    countSoftRefusal(refusals, "message_user", true);
+    expect(countSoftRefusal(refusals, "message_user", true).stuck).toBe(true);
+    // Another tool's refusals are its own.
+    expect(refusals.get("read_file")).toBeUndefined();
+  });
+
+  it("reads the refusal marker whichever layer carries the result", () => {
+    expect(softRefusalOf({ ok: false, refused: true, error: "nothing was sent" })).toBe(true);
+    expect(softRefusalOf({ details: { ok: false, refused: true } })).toBe(true);
+    expect(softRefusalOf({ error: "message is required" })).toBe(false);
+    expect(softRefusalOf(undefined)).toBe(false);
+  });
+});
+
+describe("softRefusalStopText", () => {
+  it("says nothing was sent and is recognised as a loop-guard stop", () => {
+    const text = softRefusalStopText("Message user", 3);
+    expect(text).toContain("with nothing sent 3 times in a row");
+    expect(text).toContain("without sending anything");
+    expect(isLoopGuardStopText(text)).toBe(true);
+    // The wording the user used to see must still be recognised too.
+    expect(isLoopGuardStopText(loopGuardStopText("Message user", { key: "k", count: 6 }))).toBe(
+      true,
+    );
   });
 });

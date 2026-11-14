@@ -3,6 +3,7 @@ import { ATTACHMENT_MAX_COUNT } from "@rakazo/contracts";
 import {
   BOT_MESSAGE_MAX_LENGTH,
   BOT_MESSAGE_TOO_LONG,
+  botAddressNotFoundError,
   isBackgroundRunTrigger,
   redactSecrets,
   resolveBotAddress,
@@ -34,6 +35,7 @@ import { readWorkspaceFile, saveWorkspaceFile } from "./run-tools-files.js";
 import {
   clampUserProgressMessage,
   isProgressMessageTruncated,
+  MID_TURN_PROGRESS_MAX_PER_RUN,
   MID_TURN_PROGRESS_MIN_TURN_AGE_MS,
   messageUserMaxLength,
   midTurnProgressBudgetUsed,
@@ -43,6 +45,20 @@ const ZIP_HELPS = new Set(["file not found or unreadable", "unsupported attachme
 
 /** `recipientId` is the bot the files were prepared for; delivery must go to that same bot. */
 type SentFiles = { files: AttachmentBlock[]; sharedPaths: string[]; recipientId?: string };
+
+/**
+ * A send that delivered nothing. `refused` marks the ones where repeating the same call cannot
+ * deliver anything either, so the run-level guard counts them per tool instead of per argument
+ * shape — reworded retries change the shape and would otherwise reset the count.
+ */
+function refusal(error: string) {
+  return { ok: false as const, refused: true as const, error };
+}
+
+/** The refusal a caller should see for a prepared send, or the plain error when it is fixable. */
+function refusalOrError(prepared: { error: string; refused?: true }) {
+  return prepared.refused ? refusal(prepared.error) : { error: prepared.error };
+}
 
 /** Bounds one advisor consultation: 5s minimum, 30 minutes maximum. */
 const ADVISOR_QUESTION_MAX = 20_000;
@@ -86,7 +102,7 @@ async function prepareSentFiles(
   ctx: RunContext,
   call: ToolCall,
   recipient: { botId?: string; name?: string; groupId?: string },
-): Promise<{ error: string } | SentFiles> {
+): Promise<{ error: string; refused?: true } | SentFiles> {
   const raw = call.args.files;
   if (raw === undefined || raw === null) return { files: [], sharedPaths: [] };
   if (!Array.isArray(raw) || raw.some((path) => typeof path !== "string" || !path.trim())) {
@@ -97,8 +113,8 @@ async function prepareSentFiles(
   if (paths.length > ATTACHMENT_MAX_COUNT) {
     return { error: `send at most ${ATTACHMENT_MAX_COUNT} files; zip the rest into one file` };
   }
-  const target = await findRecipient(ctx, recipient);
-  if (!target) return { error: "no bot found with that id or name. Nothing was sent." };
+  const { target, candidates } = await findRecipient(ctx, recipient);
+  if (!target) return { error: botAddressNotFoundError(candidates, recipient), refused: true };
   const { bot } = ctx;
   if (
     bot.computerId &&
@@ -136,13 +152,10 @@ function withRecipient(prepared: { error: string } | SentFiles, recipientId: str
   return "error" in prepared ? prepared : { ...prepared, recipientId };
 }
 
-/** The bot a message or handoff names, among the sender's bots or the group's members. */
-async function findRecipient(
-  ctx: RunContext,
-  recipient: { botId?: string; name?: string; groupId?: string },
-) {
-  const { run, deps, bot } = ctx;
-  const candidates = await deps.prisma.bot.findMany({
+/** The bots a recipient could name: the sender's own, or the group's members for a handoff. */
+async function recipientCandidates(ctx: RunContext, recipient: { groupId?: string }) {
+  const { run, deps } = ctx;
+  return deps.prisma.bot.findMany({
     where: {
       spaceId: run.spaceId,
       userId: run.userId,
@@ -151,8 +164,19 @@ async function findRecipient(
     },
     select: { id: true, name: true, computerId: true, computerSwitching: true },
   });
-  const target = resolveBotAddress(candidates, recipient);
-  return target && target.id !== bot.id ? target : undefined;
+}
+
+/** The bot a message or handoff names, among the sender's bots or the group's members. */
+async function findRecipient(
+  ctx: RunContext,
+  recipient: { botId?: string; name?: string; groupId?: string },
+) {
+  const { bot } = ctx;
+  // A bot is not one of its own teammates, so it is not offered as a target either.
+  const candidates = (await recipientCandidates(ctx, recipient)).filter(
+    (candidate) => candidate.id !== bot.id,
+  );
+  return { target: resolveBotAddress(candidates, recipient), candidates };
 }
 
 /** Paths on the shared computer, checked to exist, as any bot on it can address them. */
@@ -375,11 +399,15 @@ export const messagingTools: ToolHandlers = {
       !canPublishDurableProgress(reply) &&
       !canPostLongTaskHeadsUp(ctx)
     ) {
+      // A refusal has to look like one. Reporting `ok: true` with a note saying "not posted"
+      // read as a success with a caveat, so a model that had more to say reworded the call and
+      // tried again until the loop guard stopped the run — hundreds of times in the worst case.
       return call.finish({
-        ok: true,
-        note: midTurnProgressBudgetUsed(progressSinceBudgetStart(reply))
-          ? "This update was not posted. The chat already has enough interim messages for this run. Do not send more progress updates — keep working and put everything in your final reply."
-          : `This update was not posted because the turn just started. Keep working and put anything the person needs in your final reply. Once the turn has run ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds, a later update can be posted.`,
+        ok: false,
+        refused: true,
+        error: midTurnProgressBudgetUsed(progressSinceBudgetStart(reply))
+          ? `Progress budget for this run is used up (${MID_TURN_PROGRESS_MAX_PER_RUN}/${MID_TURN_PROGRESS_MAX_PER_RUN}). Nothing was sent and retrying will not help. Put the remaining content in your final reply.`
+          : `Nothing was sent: no progress update can be posted in the first ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds of a turn. Either wait until the turn has run ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds before sending one, or put this content in your final reply. Do not retry it now with different wording.`,
       });
     }
     await publishInterimMessage(ctx, text, true);
@@ -466,9 +494,9 @@ export const messagingTools: ToolHandlers = {
       botId: args.bot_id ? String(args.bot_id) : undefined,
       name: args.confirm_name ? String(args.confirm_name) : undefined,
     });
-    if ("error" in stored) return call.finish({ error: stored.error });
+    if ("error" in stored) return call.finish(refusalOrError(stored));
     const delivered = deliveredMessage(ctx, args.message, stored.sharedPaths);
-    if ("error" in delivered) return call.finish({ error: delivered.error });
+    if ("error" in delivered) return call.finish(refusalOrError(delivered));
     const sent = await messageBot(
       deps,
       { ...run, sourceMessageId: run.sourceMessageId },
@@ -486,7 +514,9 @@ export const messagingTools: ToolHandlers = {
         files: stored.files,
       },
     );
-    if (!sent.ok) return call.finish({ error: sent.error });
+    // Nothing was delivered, and a reworded repeat delivers nothing either: mark it so the
+    // run-level guard sees the retries even though each one has a different message body.
+    if (!sent.ok) return call.finish(refusal(sent.error));
     return call.finish({
       ok: true,
       botId: sent.botId,
@@ -550,9 +580,9 @@ export const messagingTools: ToolHandlers = {
       name: args.confirm_name ? String(args.confirm_name) : undefined,
       groupId,
     });
-    if ("error" in stored) return call.finish({ error: stored.error });
+    if ("error" in stored) return call.finish(refusalOrError(stored));
     const delivered = deliveredMessage(ctx, args.message, stored.sharedPaths);
-    if ("error" in delivered) return call.finish({ error: delivered.error });
+    if ("error" in delivered) return call.finish(refusalOrError(delivered));
     const result = await handoffToGroupBot(deps, run, groupId, {
       bot_id: stored.recipientId ?? (args.bot_id ? String(args.bot_id) : undefined),
       confirm_name: stored.recipientId
@@ -640,6 +670,8 @@ export const messagingTools: ToolHandlers = {
     if (failed.length) {
       return call.finish({
         ok: false,
+        // A relay that reached nobody is a refusal: no relabelled target list will deliver it.
+        ...(succeeded.length === 0 ? { refused: true } : {}),
         error: `relay incomplete: ${succeeded.length} ok, ${failed.length} failed`,
         results,
         succeeded: succeeded.map((r) => ({ botId: r.botId, name: r.name })),

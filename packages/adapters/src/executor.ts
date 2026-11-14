@@ -134,8 +134,8 @@ import type {
   RunState,
 } from "./run-context.js";
 import { restoreTurnCheckpointEffects, settleRunningHelpers } from "./run-context.js";
-import { runHeartbeatMs } from "./run-heartbeat.js";
 import { APPROVED_EFFECT_REPLAY_ORDER, buildApprovalContinuation } from "./run-effects.js";
+import { runHeartbeatMs } from "./run-heartbeat.js";
 import {
   BOT_DIRECTORY_LIMIT,
   botEmailInstruction,
@@ -1385,6 +1385,7 @@ export function createRunExecutor(executorDeps: ExecutorDeps) {
           toolCallStreak: { key: undefined, count: 0 },
           overLimitActionCalls: 0,
           toolResults: new Map(),
+          softRefusals: new Map(),
           tainted: initiallyTainted,
           ownerSettingsRefused: false,
           // A resumed turn replaces this with the baseline its saved prompt was built from.

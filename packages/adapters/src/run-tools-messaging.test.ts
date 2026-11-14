@@ -191,14 +191,18 @@ describe("sending files to another bot", () => {
     expect(mocks.messageBot).not.toHaveBeenCalled();
   });
 
-  it("reads nothing for a recipient it cannot find", async () => {
+  it("reads nothing for a recipient it cannot find, and offers the ones it can", async () => {
     const { ctx } = context("computer-servo");
-    await expect(
-      messagingTools.message_bot!(
-        ctx,
-        callWith("message_bot", { bot_id: "bot-gone", files: ["site.zip"] }),
-      ),
-    ).resolves.toEqual({ error: "no bot found with that id or name. Nothing was sent." });
+    const result = (await messagingTools.message_bot!(
+      ctx,
+      callWith("message_bot", { bot_id: "bot-gone", files: ["site.zip"] }),
+    )) as { ok?: boolean; refused?: boolean; error?: string };
+    expect(result.ok).toBe(false);
+    expect(result.refused).toBe(true);
+    expect(result.error).toContain("no bot found for bot-gone");
+    // The sender itself is not offered as a teammate to write to.
+    expect(result.error).toContain("Servo (id: bot-servo)");
+    expect(result.error).not.toContain("Coder (id: bot-coder)");
     expect(mocks.readWorkspaceFile).not.toHaveBeenCalled();
   });
 

@@ -654,7 +654,10 @@ describe("run tool selection", () => {
         messagingChannelRun: false,
       }).map((tool) => tool.name),
     ).toContain("handoff_to_bot");
-    expect(toolNames("user", "group-1")).not.toContain("message_bot");
+    // A group keeps the routes to a teammate, so message_user is not all it has left.
+    expect(toolNames("user", "group-1")).toEqual(
+      expect.arrayContaining(["message_bot", "relay_to_bots", "handoff_to_bot"]),
+    );
     expect(toolNames("user")).toContain("message_bot");
   });
 

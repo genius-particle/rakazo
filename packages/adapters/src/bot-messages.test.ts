@@ -238,13 +238,16 @@ describe("messaging another bot", () => {
     expect(harness.enqueue).not.toHaveBeenCalled();
   });
 
-  it("refuses an unknown target without starting a run", async () => {
+  it("refuses an unknown target, naming the teammates there are", async () => {
     const harness = deps();
     const sent = await messageBot(harness.deps, run, sender, {
       bot_id: "bot-missing",
       message: "hello",
     });
-    expect(sent).toEqual({ ok: false, error: "no bot found with that id or name" });
+    expect(sent.ok).toBe(false);
+    // The sender gets someone to retry with instead of handing this to the user.
+    expect(sent.ok ? "" : sent.error).toContain("no bot found for bot-missing");
+    expect(sent.ok ? "" : sent.error).toContain("bot-target");
     expect(harness.tx.run.create).not.toHaveBeenCalled();
   });
 

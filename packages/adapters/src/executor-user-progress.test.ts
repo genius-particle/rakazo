@@ -19,7 +19,7 @@ import type * as RunNotificationsModule from "./run-notifications.js";
 import { notifyRun } from "./run-notifications.js";
 import { GROUP_UNADDRESSED_REPLY_GUIDANCE, messagesModeReplyGuidance } from "./run-replies.js";
 import { PEER_NOTHING_NEW_REPLY } from "./silent-reply.js";
-import { MID_TURN_PROGRESS_MIN_TURN_AGE_MS, userProgressClientNonce } from "./user-progress.js";
+import { userProgressClientNonce } from "./user-progress.js";
 
 vi.mock("./computer-lifecycle.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ComputerLifecycleModule>()),
@@ -789,7 +789,7 @@ describe("notes that can't be posted as messages", () => {
     expect(lines).toContainEqual({ text: "Reading march.csv", activity: true });
   });
 
-  it("tells the bot whether a message_user update it can't post can be retried", async () => {
+  it("refuses a message_user update it can't post, and a retry cannot post it either", async () => {
     const update = async ({
       startedAt,
       earlier = [],
@@ -815,23 +815,68 @@ describe("notes that can't be posted as messages", () => {
       });
       return { result, sent: sentTexts(messages) };
     };
-    const notYet = {
-      ok: true,
-      note: `This update was not posted because the turn just started. Keep working and put anything the person needs in your final reply. Once the turn has run ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds, a later update can be posted.`,
-    };
-    const stop = {
-      ok: true,
-      note: "This update was not posted. The chat already has enough interim messages for this run. Do not send more progress updates — keep working and put everything in your final reply.",
-    };
-    expect(await update()).toEqual({ result: notYet, sent: [] });
+    // Nothing was sent, so the call is a failure the model cannot act on by sending again.
+    const notYet = expect.objectContaining({
+      ok: false,
+      refused: true,
+      error: expect.stringContaining("Do not retry it now with different wording"),
+    });
+    const stop = expect.objectContaining({
+      ok: false,
+      refused: true,
+      error: expect.stringContaining("Nothing was sent and retrying will not help"),
+    });
+    expect(await update()).toMatchObject({ result: notYet, sent: [] });
 
     const earlier = ["One.", "Two.", "Three."];
     const longTurn = new Date(Date.now() - 120_000);
-    expect(await update({ startedAt: longTurn, earlier })).toEqual({ result: stop, sent: earlier });
+    expect(await update({ startedAt: longTurn, earlier })).toMatchObject({
+      result: stop,
+      sent: earlier,
+    });
     // The person's message restarts the budget, so after the answer the turn is fresh again.
     expect(
       await update({ startedAt: longTurn, earlier: [...earlier, "Yes, still on it."], steerAt: 3 }),
-    ).toEqual({ result: notYet, sent: [...earlier, "Yes, still on it."] });
+    ).toMatchObject({ result: notYet, sent: [...earlier, "Yes, still on it."] });
+  });
+
+  it("stops a run that keeps sending what message_user refused, however it rewords it", async () => {
+    const { finalizeRun, messages } = await runTurn("", false, undefined, [], "fyi", {
+      trigger: "user",
+      runtime: async function* (request) {
+        for (const [index, text] of ["One.", "Two.", "Three."].entries()) {
+          const executionId = `call-${index}`;
+          yield { type: "tool", name: "message_user", args: { message: text }, executionId };
+          const result = await request.executeTool!("message_user", { message: text }, executionId);
+          // Refused, and each attempt has a different body: no shape counter sees the repeat.
+          expect(result).toMatchObject({ ok: false, refused: true });
+        }
+        yield {
+          type: "tool",
+          name: "message_user",
+          args: { message: "Four." },
+          executionId: "call-4",
+        };
+        await request.executeTool!("message_user", { message: "Four." }, "call-4");
+        yield { type: "text", text: "Done." };
+        yield { type: "done", text: "" };
+      },
+    });
+    // None of the four reached the chat, and the fourth attempt ended the run instead.
+    const published = messages
+      .flatMap((message) => message.blocks)
+      .flatMap((block) => (block.kind === "text" ? [block.text] : []))
+      .join("\n");
+    for (const refused of ["One.", "Two.", "Three.", "Four."])
+      expect(published).not.toContain(refused);
+    expect(finalizeRun).toHaveBeenCalledOnce();
+    const blocks = finalizeRun.mock.calls[0]![0].blocks;
+    expect(blocks).toContainEqual(
+      expect.objectContaining({
+        kind: "text",
+        text: expect.stringContaining("Message user with nothing sent 3 times in a row"),
+      }),
+    );
   });
 
   it("posts one heads-up at once once a fresh turn calls a browser or desktop tool", async () => {

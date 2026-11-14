@@ -1,8 +1,10 @@
 import { runContinueJob } from "@rakazo/adapter-kit";
 import type { BotMessageIntent, MessageBlock } from "@rakazo/contracts";
 import {
+  BOT_MESSAGE_HOP_EXHAUSTED,
   BOT_MESSAGE_MAX_LENGTH,
   BOT_MESSAGE_TOO_LONG,
+  botAddressNotFoundError,
   botMessageContext,
   botMessageHopExhausted,
   buildBotMessageWakePrompt,
@@ -107,7 +109,14 @@ export async function messageBot(
     botId: input.bot_id,
     name: input.confirm_name,
   });
-  if (!target) return { ok: false as const, error: "no bot found with that id or name" };
+  if (!target)
+    return {
+      ok: false as const,
+      error: botAddressNotFoundError(candidates, {
+        botId: input.bot_id,
+        name: input.confirm_name,
+      }),
+    };
   if (target.id === sender.id) return { ok: false as const, error: "a bot cannot message itself" };
   if (!target.thread)
     return { ok: false as const, error: `${target.name} has no chat to deliver to` };
@@ -119,11 +128,7 @@ export async function messageBot(
       sourceContext.intent === "question") &&
     sourceContext?.fromBotId === target.id;
   if (botMessageHopExhausted(hop) && !returnsToSender) {
-    return {
-      ok: false as const,
-      error:
-        "bot-to-bot message limit reached for this chain; report back to the user instead of messaging another bot",
-    };
+    return { ok: false as const, error: BOT_MESSAGE_HOP_EXHAUSTED };
   }
 
   const targetThreadId = target.thread.id;

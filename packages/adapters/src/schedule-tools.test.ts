@@ -238,39 +238,21 @@ describe("filterBuiltinToolsForThread", () => {
   const tools = [
     { name: "handoff_to_bot" },
     { name: "message_bot" },
+    { name: "relay_to_bots" },
     { name: "schedule_create" },
     { name: "schedule_list" },
     { name: "schedule_cancel" },
     { name: "remember" },
   ];
+  const names = (list: Array<{ name: string }>) => list.map((tool) => tool.name);
 
-  it("keeps handoff and schedule tools in groups", () => {
-    expect(filterBuiltinToolsForThread(tools, "group-1").map((tool) => tool.name)).toEqual([
-      "handoff_to_bot",
-      "schedule_create",
-      "schedule_list",
-      "schedule_cancel",
-      "remember",
-    ]);
-    expect(filterBuiltinToolsForThread(tools, null).map((tool) => tool.name)).toEqual([
-      "handoff_to_bot",
-      "message_bot",
-      "schedule_create",
-      "schedule_list",
-      "schedule_cancel",
-      "remember",
-    ]);
+  it("keeps the bot messaging tools in groups, so message_user is not the only way to speak", () => {
+    expect(names(filterBuiltinToolsForThread(tools, "group-1"))).toEqual(names(tools));
+    expect(names(filterBuiltinToolsForThread(tools, null))).toEqual(names(tools));
   });
 
   it("allows schedule creation in routine runs but hides schedule updates", () => {
-    expect(filterBuiltinToolsForRun(tools, "routine").map((tool) => tool.name)).toEqual([
-      "handoff_to_bot",
-      "message_bot",
-      "schedule_create",
-      "schedule_list",
-      "schedule_cancel",
-      "remember",
-    ]);
+    expect(names(filterBuiltinToolsForRun(tools, "routine"))).toEqual(names(tools));
     const withUpdate = [...tools, { name: "schedule_update" }];
     expect(filterBuiltinToolsForRun(withUpdate, "routine").map((tool) => tool.name)).not.toContain(
       "schedule_update",
@@ -285,13 +267,7 @@ describe("filterBuiltinToolsForThread", () => {
       filterBuiltinToolsForThread(tools, "group-1"),
       "routine",
     ).map((tool) => tool.name);
-    expect(groupTools).toEqual([
-      "handoff_to_bot",
-      "schedule_create",
-      "schedule_list",
-      "schedule_cancel",
-      "remember",
-    ]);
+    expect(groupTools).toEqual(names(tools));
     expect(
       filterBuiltinToolsForRun(filterBuiltinToolsForThread(tools, "group-1"), "user").map(
         (tool) => tool.name,
