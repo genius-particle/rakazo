@@ -391,6 +391,20 @@ describe("asking the advisor", () => {
     expect(grokbot.waitGrokbotReply).toHaveBeenCalledTimes(1);
   });
 
+  it("returns even when the advisor never answers", async () => {
+    const { ctx } = advisorContext();
+    // The blocking path would sit on this promise; the default path must not
+    // touch it at all.
+    grokbot.waitGrokbotReply.mockImplementationOnce(() => new Promise<string>(() => {}));
+    const started = Date.now();
+    const result = await messagingTools.ask_grokbot!(
+      ctx,
+      callWith("ask_grokbot", { question: "should we ship?" }),
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(result).toMatchObject({ ok: true, accepted: true });
+  });
+
   it("fails the ask when the send fails, leaving nothing open", async () => {
     const { ctx } = advisorContext();
     (ctx.deps.sendToMessagingThread as unknown as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
