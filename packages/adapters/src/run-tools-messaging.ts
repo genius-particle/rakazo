@@ -32,7 +32,7 @@ import {
 import type { ToolCall, ToolHandlers } from "./run-tool-gate.js";
 import type { AttachmentBlock } from "./run-tools-files.js";
 import { readWorkspaceFile, saveWorkspaceFile } from "./run-tools-files.js";
-import { progressWindowStopText } from "./tool-loop.js";
+import { MID_TURN_PROGRESS_WINDOW_GIVE_UP, progressWindowStopText } from "./tool-loop.js";
 import {
   clampUserProgressMessage,
   isProgressMessageTruncated,
@@ -436,14 +436,19 @@ export const messagingTools: ToolHandlers = {
           error: `Do not call message_user again and do not retry — write what you wanted to say into your final reply now. The progress budget for this run is used up (${MID_TURN_PROGRESS_MAX_PER_RUN}/${MID_TURN_PROGRESS_MAX_PER_RUN}), so nothing was sent and retrying will not help.`,
         });
       }
-      ctx.state.progressWindowRefusals = (ctx.state.progressWindowRefusals ?? 0) + 1;
+      const refusals = (ctx.state.progressWindowRefusals ?? 0) + 1;
+      ctx.state.progressWindowRefusals = refusals;
       const windowSeconds = MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000;
       // Twice ignored, every further refusal carries only the closing note: Chinese, so even
       // a model that quotes it verbatim cannot surface machine-flavoured English in the chat.
-      // It is a tool result — never published to the person.
+      // It is a tool result — never published to the person. The refusal just before the
+      // silent give-up adds a final warning: three identical notes in a row could read as
+      // "try once more" instead of "stop".
       const closing =
-        ctx.state.progressWindowRefusals > MID_TURN_PROGRESS_WINDOW_REFUSALS
-          ? progressWindowStopText(windowSeconds)
+        refusals > MID_TURN_PROGRESS_WINDOW_REFUSALS
+          ? refusals >= MID_TURN_PROGRESS_WINDOW_GIVE_UP
+            ? `${progressWindowStopText(windowSeconds)}这是最后一次提醒，下次调用将被直接结束，不会再给你重试机会。`
+            : progressWindowStopText(windowSeconds)
           : undefined;
       return call.finish({
         ok: false,

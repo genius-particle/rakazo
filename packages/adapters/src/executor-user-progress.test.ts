@@ -943,20 +943,34 @@ describe("notes that can't be posted as messages", () => {
   });
 
   it("ends a model that keeps calling message_user past the closing note, silently", async () => {
-    // Past the closing note a further call can only produce another refusal. At the give-up
-    // count the turn guard ends the run — without a published explanation, because the person
-    // must not find a system note where their answer should have been.
+    // Past the closing note a further call can only produce another refusal. The refusal just
+    // before the give-up says it is the last warning; at the give-up count the turn guard
+    // ends the run — without a published explanation, because the person must not find a
+    // system note where their answer should have been.
     const { finalizeRun, messages } = await runTurn("", false, undefined, [], "fyi", {
       trigger: "user",
       runtime: async function* (request) {
+        const results: unknown[] = [];
         for (let index = 0; index < MID_TURN_PROGRESS_WINDOW_GIVE_UP + 1; index += 1) {
           const executionId = `call-${index}`;
           const text = `Try ${index}.`;
           yield { type: "tool", name: "message_user", args: { message: text }, executionId };
-          await request.executeTool!("message_user", { message: text }, executionId).catch(
-            () => undefined,
+          results.push(
+            await request.executeTool!("message_user", { message: text }, executionId).catch(
+              () => undefined,
+            ),
           );
         }
+        // The warning rides on the give-up refusal alone: identical closing notes before it
+        // must not numb the model into "one more try".
+        expect(results[MID_TURN_PROGRESS_WINDOW_GIVE_UP - 1]).toMatchObject({
+          ok: false,
+          windowRefused: true,
+          error: expect.stringContaining("最后一次提醒"),
+        });
+        expect(
+          (results[MID_TURN_PROGRESS_WINDOW_GIVE_UP - 2] as { error?: string }).error,
+        ).not.toContain("最后一次提醒");
         yield { type: "text", text: "Late." };
         yield { type: "done", text: "" };
       },
