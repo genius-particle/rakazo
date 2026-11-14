@@ -101,8 +101,8 @@ import {
   loopGuardStopText,
   MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS,
   MAX_CONSECUTIVE_SOFT_REFUSALS,
+  MID_TURN_PROGRESS_WINDOW_GIVE_UP,
   overLimitStopText,
-  progressWindowStopText,
   softRefusalStopText,
   toolResultFingerprint,
 } from "./tool-loop.js";
@@ -112,8 +112,6 @@ import {
   clampUserProgressMessage,
   extractNarrationText,
   finalBlocksAfterMidTurnProgress,
-  MID_TURN_PROGRESS_MIN_TURN_AGE_MS,
-  MID_TURN_PROGRESS_WINDOW_REFUSALS,
   STEERING_RESET_MIN_GAP_MS,
   STEERING_RESETS_MAX_PER_RUN,
   USER_PROGRESS_MESSAGE_MAX_LENGTH,
@@ -572,13 +570,15 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
   // matter how the arguments read. This is what shape counting cannot see.
   const refusals = ctx.state.softRefusals?.get(event.name) ?? 0;
   const stuckOnRefusal = refusals >= MAX_CONSECUTIVE_SOFT_REFUSALS;
-  // Two opening-window refusals mean the model ignored "write it in your final reply" twice.
-  // Handing message_user out a third time only teaches it to try a fourth time, so the loop
-  // stops here and the run finishes with what it streamed. This is not the stuck-loop death:
-  // the refusal was the clock, the reply still goes out, and the person can simply ask again.
+  // Past the closing note (progressWindowRefusals >= MID_TURN_PROGRESS_WINDOW_REFUSALS, set in
+  // the message_user handler) every further call is refused on receipt — the model has been
+  // told, in its own tool result, to write the final reply instead. The turn guard only ends
+  // the run here, at the give-up count, when it kept calling anyway. The refusal was the
+  // clock and the note already said everything; the give-up stop stays silent (see
+  // stopStuckToolLoop), and the run keeps whatever the model streamed.
   const windowStopDue =
     event.name === "message_user" &&
-    (ctx.state.progressWindowRefusals ?? 0) >= MID_TURN_PROGRESS_WINDOW_REFUSALS;
+    (ctx.state.progressWindowRefusals ?? 0) >= MID_TURN_PROGRESS_WINDOW_GIVE_UP;
   if (
     loopGuard.stuck ||
     stuckOnRefusal ||
@@ -650,14 +650,17 @@ async function stopStuckToolLoop(
   ctx.state.terminalCheckpointComplete = true;
   const overLimit = ctx.state.overLimitActionCalls;
   const humanName = humanizeToolName(toolName);
+  // The opening-window give-up is not a stuck loop: every refusal already told the model to
+  // write its final reply, so publishing one more explanation would put a system note in the
+  // chat where the person's answer should have been. This stop ends the run silently; the
+  // streamed reply (if any) was published above, and the person can simply ask again.
+  const silent = reason === "progressWindow";
   const stuckText =
     overLimit >= MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS
       ? overLimitStopText(humanName, overLimit)
-      : reason === "progressWindow"
-        ? progressWindowStopText(MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000)
-        : reason === "softRefusal"
-          ? softRefusalStopText(humanName, ctx.state.softRefusals?.get(toolName) ?? 0)
-          : loopGuardStopText(humanName, ctx.state.toolCallStreak);
+      : reason === "softRefusal"
+        ? softRefusalStopText(humanName, ctx.state.softRefusals?.get(toolName) ?? 0)
+        : loopGuardStopText(humanName, ctx.state.toolCallStreak);
   await ctx.settleRunningHelpers();
   const stopped = await deps.events.finalizeRun({
     spaceId: run.spaceId,
@@ -669,7 +672,8 @@ async function stopStuckToolLoop(
     leaseOwner: workerId,
     leaseFence: fence,
     outcome: "completed",
-    blocks: isBackgroundRunTrigger(run.trigger) ? [] : [{ kind: "text", text: stuckText }],
+    blocks:
+      isBackgroundRunTrigger(run.trigger) || silent ? [] : [{ kind: "text", text: stuckText }],
   });
   if (!stopped) return;
   ctx.stopHeartbeatAfterCompletion();

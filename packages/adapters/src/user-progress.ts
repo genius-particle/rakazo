@@ -55,10 +55,13 @@ export const STEERING_RESET_MIN_GAP_MS = 60_000;
 export const MID_TURN_PROGRESS_MAX_PER_RUN = 3;
 
 /**
- * Opening-window refusals of message_user tolerated before the turn guard stops handing the
- * call out and asks for the final reply instead. Counted apart from the run-level refusal
- * streak: this refusal clears itself with time, so ending a short run on it would deliver
- * nothing. Two mean the model ignored "write it in your final reply" twice in a row.
+ * Opening-window refusals of message_user tolerated before the handler switches every further
+ * refusal to the closing note (progressWindowStopText) that tells the model to write its final
+ * reply instead of calling again. Counted apart from the run-level refusal streak: this
+ * refusal clears itself with time, so ending a short run on it would deliver nothing. Two
+ * mean the model ignored "write it in your final reply" twice in a row. The turn guard's own
+ * give-up (MID_TURN_PROGRESS_WINDOW_GIVE_UP) only ends the run later, for a model that kept
+ * calling anyway.
  */
 export const MID_TURN_PROGRESS_WINDOW_REFUSALS = 2;
 
@@ -71,6 +74,23 @@ export function midTurnProgressBudgetAllows(publishedCount: number, turnAgeMs: n
   return (
     !midTurnProgressBudgetUsed(publishedCount) && turnAgeMs >= MID_TURN_PROGRESS_MIN_TURN_AGE_MS
   );
+}
+
+/**
+ * The key a posted progress message is deduplicated by. One message reaches the person in
+ * many coats — extra spaces, a swapped full-width comma, a doubled exclamation mark, an
+ * upper-case word — and every one of them is the same post, so the key folds case, folds
+ * full- and half-width forms (NFKC), and collapses any run of punctuation into a single
+ * separator. It stays textual on purpose: no synonym or semantic folding, or "正在查 A"
+ * would swallow "正在查 B".
+ */
+export function postedTextKey(text: string): string {
+  return text
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /** Whether the run has posted every durable interim message it may, however long it runs. */

@@ -39,14 +39,23 @@ export function softRefusalStopText(toolName: string, count: number): string {
 }
 
 /**
- * The turn guard stopped `message_user` after repeated opening-window refusals. Unlike the
- * stuck loops above the run is not dead: the reply it publishes is what the bot streamed, and
- * the person can simply ask again. The text says why nothing was posted instead of blaming a
- * stuck call, because every refusal here was the clock, not the model.
+ * The turn guard stopped handing `message_user` out after repeated opening-window refusals.
+ * This note is the tool result the model reads from then on — never a message to the person:
+ * the stop is not a stuck loop, so the chat must not end on a system explanation. It leads
+ * with the instruction and speaks Chinese, so nothing machine-flavoured can surface even if
+ * the model quotes it.
  */
 export function progressWindowStopText(seconds: number): string {
-  return `Progress updates are not allowed in the first ${seconds} seconds of a turn, and message_user was refused that way twice, so I stopped calling it and finished the turn with what I have. If my reply above is empty or incomplete, ask me and I will answer directly.`;
+  return `不要再调用 message_user，也不要重试——现在就把要说的话写进最终回复。本轮开始的前 ${seconds} 秒不允许发进度消息，这个限制已经拒绝了两次；再发也只会被同样拒绝，请把剩余内容全部写进最终回复。`;
 }
+
+/**
+ * Opening-window refusals past the closing note are refused on sight, so a model that keeps
+ * calling anyway only burns refusals — until this many, where the turn guard ends the run.
+ * That stop is silent: everything worth saying was in the refusal receipts already, and the
+ * person must not find a system note where their answer should have been.
+ */
+export const MID_TURN_PROGRESS_WINDOW_GIVE_UP = 5;
 
 export function isLoopGuardStopText(text: string): boolean {
   return LOOP_GUARD_STOP_PATTERN.test(text) || SOFT_REFUSAL_STOP_PATTERN.test(text);

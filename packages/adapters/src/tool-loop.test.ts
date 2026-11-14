@@ -442,10 +442,11 @@ describe("softRefusalStopText", () => {
 });
 
 describe("progressWindowStopText", () => {
-  it("names the window rule rather than a stuck call", () => {
+  it("leads with the instruction and speaks Chinese, for the model only", () => {
     const text = progressWindowStopText(60);
-    expect(text).toContain("not allowed in the first 60 seconds");
-    expect(text).toContain("refused that way twice");
+    expect(text.startsWith("不要再调用 message_user")).toBe(true);
+    expect(text).toContain("60 秒");
+    expect(text).toContain("写进最终回复");
     expect(text).not.toContain("I got stuck calling");
   });
 });

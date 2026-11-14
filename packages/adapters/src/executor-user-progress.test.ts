@@ -19,7 +19,8 @@ import type * as RunNotificationsModule from "./run-notifications.js";
 import { notifyRun } from "./run-notifications.js";
 import { GROUP_UNADDRESSED_REPLY_GUIDANCE, messagesModeReplyGuidance } from "./run-replies.js";
 import { PEER_NOTHING_NEW_REPLY } from "./silent-reply.js";
-import { userProgressClientNonce } from "./user-progress.js";
+import { MID_TURN_PROGRESS_WINDOW_GIVE_UP } from "./tool-loop.js";
+import { postedTextKey, userProgressClientNonce } from "./user-progress.js";
 
 vi.mock("./computer-lifecycle.js", async (importOriginal) => ({
   ...(await importOriginal<typeof ComputerLifecycleModule>()),
@@ -826,7 +827,7 @@ describe("notes that can't be posted as messages", () => {
     const stop = expect.objectContaining({
       ok: false,
       refused: true,
-      error: expect.stringContaining("Nothing was sent and retrying will not help"),
+      error: expect.stringContaining("retrying will not help"),
     });
     const firstCall = await update();
     expect(firstCall.sent).toEqual([]);
@@ -899,35 +900,64 @@ describe("notes that can't be posted as messages", () => {
     );
   });
 
-  it("stops handing out message_user after two opening-window refusals", async () => {
+  it("lets the turn finish on its own after two opening-window refusals", async () => {
     // The first-seconds refusal clears itself with time, so it never feeds the run-level
-    // streak that kills short runs. But a model that ignored "write it in your final reply"
-    // twice will not deliver anything by trying a third time, so the turn guard stops the
-    // loop instead and the run finishes with what it streamed — not judged dead.
+    // streak that kills short runs. Once the model has ignored "write it in your final
+    // reply" twice, every further refusal carries only the Chinese closing note — a tool
+    // result, never a published message — and the turn ends the ordinary way, on the
+    // model's own final reply. That reply generation must still see the latest tool ledger.
     const { finalizeRun, messages } = await runTurn("", false, undefined, [], "fyi", {
       trigger: "user",
       runtime: async function* (request) {
-        for (const [index, text] of ["One.", "Two."].entries()) {
+        for (const [index, text] of ["One.", "Two.", "Three."].entries()) {
           const executionId = `call-${index}`;
           yield { type: "tool", name: "message_user", args: { message: text }, executionId };
           const result = await request.executeTool!("message_user", { message: text }, executionId);
           expect(result).toMatchObject({ ok: false, windowRefused: true });
           // Not a terminal refusal: it must not feed the streak that ends short runs.
           expect((result as { refused?: boolean }).refused).toBeUndefined();
-          expect((result as { error?: string }).error).toContain(
-            "Do not call message_user again and do not retry",
+          const error = (result as { error?: string }).error;
+          if (index < 2) {
+            expect(error).toContain("Do not call message_user again and do not retry");
+          } else {
+            // The closing note leads with the instruction and speaks Chinese.
+            expect(error).toContain("不要再调用 message_user");
+            expect(error).toContain("写进最终回复");
+          }
+        }
+        yield { type: "text", text: "Done." };
+        yield { type: "done", text: "" };
+      },
+    });
+    // None of the refused posts reached the chat, and the run finished on the model's own
+    // final reply — no system-flavoured stop note was published to the person.
+    const published = messages
+      .flatMap((message) => message.blocks)
+      .flatMap((block) => (block.kind === "text" ? [block.text] : []))
+      .join("\n");
+    for (const refused of ["One.", "Two.", "Three."]) expect(published).not.toContain(refused);
+    expect(finalizeRun).toHaveBeenCalledOnce();
+    const blocks = JSON.stringify(finalizeRun.mock.calls[0]![0].blocks);
+    expect(blocks).toContain("Done.");
+    expect(blocks).not.toContain("60 秒");
+  });
+
+  it("ends a model that keeps calling message_user past the closing note, silently", async () => {
+    // Past the closing note a further call can only produce another refusal. At the give-up
+    // count the turn guard ends the run — without a published explanation, because the person
+    // must not find a system note where their answer should have been.
+    const { finalizeRun, messages } = await runTurn("", false, undefined, [], "fyi", {
+      trigger: "user",
+      runtime: async function* (request) {
+        for (let index = 0; index < MID_TURN_PROGRESS_WINDOW_GIVE_UP + 1; index += 1) {
+          const executionId = `call-${index}`;
+          const text = `Try ${index}.`;
+          yield { type: "tool", name: "message_user", args: { message: text }, executionId };
+          await request.executeTool!("message_user", { message: text }, executionId).catch(
+            () => undefined,
           );
         }
-        yield {
-          type: "tool",
-          name: "message_user",
-          args: { message: "Three." },
-          executionId: "call-3",
-        };
-        await request.executeTool!("message_user", { message: "Three." }, "call-3").catch(
-          () => undefined,
-        );
-        yield { type: "text", text: "Done." };
+        yield { type: "text", text: "Late." };
         yield { type: "done", text: "" };
       },
     });
@@ -935,25 +965,22 @@ describe("notes that can't be posted as messages", () => {
       .flatMap((message) => message.blocks)
       .flatMap((block) => (block.kind === "text" ? [block.text] : []))
       .join("\n");
-    for (const refused of ["One.", "Two.", "Three."]) expect(published).not.toContain(refused);
+    for (let index = 0; index < MID_TURN_PROGRESS_WINDOW_GIVE_UP + 1; index += 1)
+      expect(published).not.toContain(`Try ${index}.`);
+    expect(published).not.toContain("Late.");
+    expect(published).not.toContain("60 秒");
     expect(finalizeRun).toHaveBeenCalledOnce();
-    const blocks = finalizeRun.mock.calls[0]![0].blocks;
-    expect(blocks).toContainEqual(
-      expect.objectContaining({
-        kind: "text",
-        text: expect.stringContaining("Progress updates are not allowed in the first 60 seconds"),
-      }),
-    );
   });
 
   it("refuses an identical message_user post instead of sending it twice", async () => {
-    // The person already read the first one. Whitespace differences do not make it new.
+    // The person already read the first one. Whitespace, punctuation width, punctuation
+    // runs, and case do not make it new either — only different words do.
     const longTurn = new Date(Date.now() - 120_000);
     const { messages } = await runTurn("", false, undefined, [], "fyi", {
       startedAt: longTurn,
       trigger: "user",
       runtime: async function* (request) {
-        const texts = ["Hello there.", "Hello  there."];
+        const texts = ["Hello there.", "Hello  there.", "HELLO THERE!!", "Hello there…"];
         for (const [index, text] of texts.entries()) {
           const executionId = `call-${index}`;
           yield { type: "tool", name: "message_user", args: { message: text }, executionId };
@@ -971,7 +998,20 @@ describe("notes that can't be posted as messages", () => {
       },
     });
     const sent = sentTexts(messages);
-    expect(sent.filter((text) => text.replace(/\s+/g, " ") === "Hello there.").length).toBe(1);
+    expect(
+      sent.filter((text) => postedTextKey(text) === postedTextKey("Hello there.")).length,
+    ).toBe(1);
+  });
+
+  describe("postedTextKey", () => {
+    it("folds case, width, punctuation runs, and whitespace", () => {
+      expect(postedTextKey("Hello,  there!")).toBe(postedTextKey("hello there"));
+      expect(postedTextKey("正在查 A……")).toBe(postedTextKey("正在查 a"));
+      expect(postedTextKey("ＯＫ！（全角）")).toBe(postedTextKey("ok!（全角）"));
+      // But it stays textual: different words remain different posts.
+      expect(postedTextKey("正在查 A")).not.toBe(postedTextKey("正在查 B"));
+      expect(postedTextKey("")).toBe("");
+    });
   });
 
   it("posts one heads-up at once once a fresh turn calls a browser or desktop tool", async () => {

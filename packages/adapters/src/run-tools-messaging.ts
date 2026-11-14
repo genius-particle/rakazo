@@ -32,6 +32,7 @@ import {
 import type { ToolCall, ToolHandlers } from "./run-tool-gate.js";
 import type { AttachmentBlock } from "./run-tools-files.js";
 import { readWorkspaceFile, saveWorkspaceFile } from "./run-tools-files.js";
+import { progressWindowStopText } from "./tool-loop.js";
 import {
   clampUserProgressMessage,
   isProgressMessageTruncated,
@@ -40,6 +41,7 @@ import {
   MID_TURN_PROGRESS_WINDOW_REFUSALS,
   messageUserMaxLength,
   midTurnProgressBudgetUsed,
+  postedTextKey,
 } from "./user-progress.js";
 
 const ZIP_HELPS = new Set(["file not found or unreadable", "unsupported attachment type"]);
@@ -388,9 +390,10 @@ export const messagingTools: ToolHandlers = {
     if (!text) return call.finish({ error: "message is required" });
     const truncated = isProgressMessageTruncated(rawMessage, maxLength);
     // The person already read what was posted. A second identical post — however it is
-    // spaced — is a retry wearing a new coat, so refuse it like one.
+    // respaced, re-cased, or re-punctuated — is a retry wearing a new coat, so refuse it
+    // like one. Only text-shaped folding applies: no synonyms, no semantics.
     ctx.state.postedProgressTexts ??= new Set();
-    const postedKey = text.replace(/\s+/g, " ").trim();
+    const postedKey = postedTextKey(text);
     if (ctx.state.postedProgressTexts.has(postedKey)) {
       return call.finish({
         ok: false,
@@ -424,20 +427,30 @@ export const messagingTools: ToolHandlers = {
       // handing the call out.
       const budgetUsed = midTurnProgressBudgetUsed(progressSinceBudgetStart(reply));
       if (budgetUsed) {
+        // The instruction the model must act on leads here too, matching the window refusal:
+        // an instruction buried after the explanation was read as noise, and the call came
+        // back unchanged.
         return call.finish({
           ok: false,
           refused: true,
-          error: `Progress budget for this run is used up (${MID_TURN_PROGRESS_MAX_PER_RUN}/${MID_TURN_PROGRESS_MAX_PER_RUN}). Nothing was sent and retrying will not help. Put the remaining content in your final reply.`,
+          error: `Do not call message_user again and do not retry — write what you wanted to say into your final reply now. The progress budget for this run is used up (${MID_TURN_PROGRESS_MAX_PER_RUN}/${MID_TURN_PROGRESS_MAX_PER_RUN}), so nothing was sent and retrying will not help.`,
         });
       }
-      // The instruction the model must act on comes first: an instruction buried after the
-      // explanation was read as noise, and the call came back unchanged.
       ctx.state.progressWindowRefusals = (ctx.state.progressWindowRefusals ?? 0) + 1;
-      const repeatRefusal = ctx.state.progressWindowRefusals > MID_TURN_PROGRESS_WINDOW_REFUSALS;
+      const windowSeconds = MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000;
+      // Twice ignored, every further refusal carries only the closing note: Chinese, so even
+      // a model that quotes it verbatim cannot surface machine-flavoured English in the chat.
+      // It is a tool result — never published to the person.
+      const closing =
+        ctx.state.progressWindowRefusals > MID_TURN_PROGRESS_WINDOW_REFUSALS
+          ? progressWindowStopText(windowSeconds)
+          : undefined;
       return call.finish({
         ok: false,
         windowRefused: true,
-        error: `Do not call message_user again and do not retry — write what you wanted to say into your final reply now. No progress update can be posted in the first ${MID_TURN_PROGRESS_MIN_TURN_AGE_MS / 1000} seconds of a turn, so nothing was sent.${repeatRefusal ? " Every further call will be refused the same way." : ""}`,
+        error:
+          closing ??
+          `Do not call message_user again and do not retry — write what you wanted to say into your final reply now. No progress update can be posted in the first ${windowSeconds} seconds of a turn, so nothing was sent.`,
       });
     }
     await publishInterimMessage(ctx, text, true);
