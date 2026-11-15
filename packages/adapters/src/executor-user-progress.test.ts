@@ -817,8 +817,9 @@ describe("notes that can't be posted as messages", () => {
       return { result, sent: sentTexts(messages) };
     };
     // Nothing was sent, so the call is a failure the model cannot act on by sending again.
-    // The instruction the model must act on leads the text: one buried after the explanation
-    // was read as noise, and the same call came back unchanged.
+    // Both refusals name where the content goes instead: a teammate's route is message_bot,
+    // the user's is the final reply. Neither says "stop and put it all in the reply", which is
+    // how a dispatcher's instruction used to end up in front of the user.
     const notYet = expect.objectContaining({
       ok: false,
       windowRefused: true,
@@ -827,7 +828,7 @@ describe("notes that can't be posted as messages", () => {
     const stop = expect.objectContaining({
       ok: false,
       refused: true,
-      error: expect.stringContaining("retrying will not help"),
+      error: expect.stringContaining("message_bot or relay_to_bots"),
     });
     const firstCall = await update();
     expect(firstCall.sent).toEqual([]);

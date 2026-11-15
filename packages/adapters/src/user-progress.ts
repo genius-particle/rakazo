@@ -56,12 +56,12 @@ export const MID_TURN_PROGRESS_MAX_PER_RUN = 3;
 
 /**
  * Opening-window refusals of message_user tolerated before the handler switches every further
- * refusal to the closing note (progressWindowStopText) that tells the model to write its final
- * reply instead of calling again. Counted apart from the run-level refusal streak: this
- * refusal clears itself with time, so ending a short run on it would deliver nothing. Two
- * mean the model ignored "write it in your final reply" twice in a row. The turn guard's own
- * give-up (MID_TURN_PROGRESS_WINDOW_GIVE_UP) only ends the run later, for a model that kept
- * calling anyway.
+ * refusal to the closing note (progressWindowStopText) that tells the model where the content
+ * goes instead — a teammate's route through message_bot, the user's through the final reply.
+ * Counted apart from the run-level refusal streak: this refusal clears itself with time, so
+ * ending a short run on it would deliver nothing. Two mean the model kept calling after being
+ * told that twice in a row. The turn guard's own give-up (MID_TURN_PROGRESS_WINDOW_GIVE_UP)
+ * only ends the run later, for a model that kept calling anyway.
  */
 export const MID_TURN_PROGRESS_WINDOW_REFUSALS = 2;
 

@@ -154,7 +154,9 @@ export function botAddressNotFoundError(
     roster.length
       ? `Teammates you can address: ${roster.join(" ")}`
       : "There are no other bots in this space that could receive it.",
-    "Retry with one of those ids or names. Do not send the message to the user instead.",
+    roster.length
+      ? "Send it again now, in this turn, with message_bot and one of those ids or names. Do not send the message to the user instead, and do not leave it for a later turn."
+      : "Do not send the message to the user instead, and do not leave it for a later turn.",
   ].join(" ");
 }
 

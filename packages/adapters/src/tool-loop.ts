@@ -43,10 +43,11 @@ export function softRefusalStopText(toolName: string, count: number): string {
  * This note is the tool result the model reads from then on — never a message to the person:
  * the stop is not a stuck loop, so the chat must not end on a system explanation. It leads
  * with the instruction and speaks Chinese, so nothing machine-flavoured can surface even if
- * the model quotes it.
+ * the model quotes it — and it keeps both destinations open: a teammate still has a route,
+ * and it is not the user's chat.
  */
 export function progressWindowStopText(seconds: number): string {
-  return `不要再调用 message_user，也不要重试——现在就把要说的话写进最终回复。本轮开始的前 ${seconds} 秒不允许发进度消息，这个限制已经拒绝了两次；再发也只会被同样拒绝，请把剩余内容全部写进最终回复。`;
+  return `不要再调用 message_user，也不要重试——本轮开始的前 ${seconds} 秒不允许发进度消息，这个限制已经拒绝了两次；再发也只会被同样拒绝。给队友的指令现在就用 message_bot 或 relay_to_bots 发出去，不要留给用户，也不要拖到下一轮；给用户的内容写进最终回复。`;
 }
 
 /**

@@ -45,6 +45,7 @@ import type { createRunTrustLoaders } from "./run-trust.js";
 import type { inferScript } from "./scripted-runtime.js";
 import type { LoopGuardStreak } from "./tool-loop.js";
 import { restoreTurnCheckpoint, unresolvedTurnCheckpointCalls } from "./turn-checkpoint.js";
+import type { TeammateAddress } from "./user-chat-send-gate.js";
 
 export type RunningHelper = Omit<Extract<MessageBlock, { kind: "subagent" }>, "kind">;
 
@@ -185,8 +186,8 @@ export interface RunState {
    * How often `message_user` was refused for the opening-window rule alone ("no progress
    * update in the first seconds of a turn"). Counted separately from `softRefusals` because
    * this refusal clears itself with time — feeding the run-level streak would kill short
-   * runs before their answer is delivered. Two refusals mean the model ignored the
-   * "write it in your final reply" instruction twice, so the loop stops handing the call out.
+   * runs before their answer is delivered. Two refusals mean the model kept calling after
+   * being told where the content goes, so the loop stops handing the call out.
    */
   progressWindowRefusals: number;
   /**
@@ -194,6 +195,11 @@ export interface RunState {
    * post is refused: the person has read it, and re-sending it is a retry in disguise.
    */
   postedProgressTexts: Set<string>;
+  /**
+   * The teammates this run can address, read once and reused by the user-chat send gate:
+   * prose that names one of them belongs to that bot, so message_user refuses it.
+   */
+  userChatTeammates?: TeammateAddress[];
   /** Consecutive `computer_act`/`browser_act` batches over the action limit, this one included. */
   overLimitActionCalls: number;
   /**

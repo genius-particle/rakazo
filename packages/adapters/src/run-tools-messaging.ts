@@ -33,6 +33,8 @@ import type { ToolCall, ToolHandlers } from "./run-tool-gate.js";
 import type { AttachmentBlock } from "./run-tools-files.js";
 import { readWorkspaceFile, saveWorkspaceFile } from "./run-tools-files.js";
 import { MID_TURN_PROGRESS_WINDOW_GIVE_UP, progressWindowStopText } from "./tool-loop.js";
+import type { TeammateAddress } from "./user-chat-send-gate.js";
+import { teammateAddressedRefusal, teammateNamedIn } from "./user-chat-send-gate.js";
 import {
   clampUserProgressMessage,
   isProgressMessageTruncated,
@@ -180,6 +182,21 @@ async function findRecipient(
     (candidate) => candidate.id !== bot.id,
   );
   return { target: resolveBotAddress(candidates, recipient), candidates };
+}
+
+/**
+ * The teammates a user-chat send could be addressed to: the same bots message_bot resolves,
+ * minus the sender. Read once per run — a roster does not change mid-turn, and message_user is
+ * called often enough that a query per call would be waste.
+ */
+async function userChatTeammates(ctx: RunContext): Promise<readonly TeammateAddress[]> {
+  if (!ctx.state.userChatTeammates) {
+    const candidates = await recipientCandidates(ctx, {});
+    ctx.state.userChatTeammates = candidates
+      .filter((candidate) => candidate.id !== ctx.bot.id)
+      .map(({ id, name }) => ({ id, name }));
+  }
+  return ctx.state.userChatTeammates;
 }
 
 /** Paths on the shared computer, checked to exist, as any bot on it can address them. */
@@ -388,6 +405,13 @@ export const messagingTools: ToolHandlers = {
     const maxLength = messageUserMaxLength();
     const text = clampUserProgressMessage(rawMessage, maxLength);
     if (!text) return call.finish({ error: "message is required" });
+    // A body that names a teammate is that bot's instruction, not a progress note. The
+    // platform closes the outlet here instead of trusting the model to pick the right tool:
+    // nothing is posted, and the content keeps its route through message_bot.
+    const addressed = teammateNamedIn(rawMessage, await userChatTeammates(ctx));
+    if (addressed) {
+      return call.finish({ ok: false, refused: true, error: teammateAddressedRefusal(addressed) });
+    }
     const truncated = isProgressMessageTruncated(rawMessage, maxLength);
     // The person already read what was posted. A second identical post — however it is
     // respaced, re-cased, or re-punctuated — is a retry wearing a new coat, so refuse it
@@ -423,8 +447,13 @@ export const messagingTools: ToolHandlers = {
       // first-seconds refusal clears itself with time, so it must not feed the run-level streak
       // that ends the turn — a run that finishes in under a minute would be stopped with its
       // answer never delivered. It gets its own counter instead: two refusals mean the model
-      // ignored the "write it in your final reply" instruction twice, and the turn guard stops
-      // handing the call out.
+      // kept calling after being told where the content goes, and the turn guard stops handing
+      // the call out.
+      //
+      // Both refusals are destination-aware. They name the user as the only reader of this
+      // outlet and point teammate-bound text back at message_bot, in this same turn: the old
+      // copy said "do not retry — write it in your final reply", and a dispatcher that had
+      // meant a teammate followed that instruction into the user's chat.
       const budgetUsed = midTurnProgressBudgetUsed(progressSinceBudgetStart(reply));
       if (budgetUsed) {
         // The instruction the model must act on leads here too, matching the window refusal:
@@ -433,7 +462,7 @@ export const messagingTools: ToolHandlers = {
         return call.finish({
           ok: false,
           refused: true,
-          error: `Do not call message_user again and do not retry — write what you wanted to say into your final reply now. The progress budget for this run is used up (${MID_TURN_PROGRESS_MAX_PER_RUN}/${MID_TURN_PROGRESS_MAX_PER_RUN}), so nothing was sent and retrying will not help.`,
+          error: `Do not call message_user again in this run, and do not retry it: the progress budget is used up (${MID_TURN_PROGRESS_MAX_PER_RUN}/${MID_TURN_PROGRESS_MAX_PER_RUN}), so nothing was sent. Any of it meant for a teammate goes out now with message_bot or relay_to_bots. Anything meant for the user goes in your final reply.`,
         });
       }
       const refusals = (ctx.state.progressWindowRefusals ?? 0) + 1;
@@ -455,7 +484,7 @@ export const messagingTools: ToolHandlers = {
         windowRefused: true,
         error:
           closing ??
-          `Do not call message_user again and do not retry — write what you wanted to say into your final reply now. No progress update can be posted in the first ${windowSeconds} seconds of a turn, so nothing was sent.`,
+          `Do not call message_user again and do not retry it: no progress update can be posted in the first ${windowSeconds} seconds of a turn, so nothing was sent. Text meant for a teammate still has its route — send it now with message_bot or relay_to_bots. Text meant for the user goes in your final reply.`,
       });
     }
     await publishInterimMessage(ctx, text, true);
@@ -473,7 +502,7 @@ export const messagingTools: ToolHandlers = {
         ? {
             ok: true,
             truncated: true,
-            note: `This progress update was cut off at ${maxLength} characters and the user only saw the truncated version above — it did NOT deliver your full content. message_user is for short interim beats only, never the final answer. Put your complete answer in your normal final reply instead of relying on this truncated update.`,
+            note: `This progress update was cut off at ${maxLength} characters and the user only saw the truncated version above — it did NOT deliver your full content. message_user is for short interim beats only, never a final answer or a teammate's instruction: send that again in full with message_bot or relay_to_bots. Anything meant for the user goes in your normal final reply.`,
           }
         : { ok: true },
     );

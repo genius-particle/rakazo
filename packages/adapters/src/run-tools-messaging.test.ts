@@ -333,6 +333,71 @@ describe("sending files to another bot", () => {
   });
 });
 
+describe("sending a teammate's instruction to the user", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  // `context()` carries no reply state, so a call that reached any publishing path would
+  // throw: a clean refusal is also proof that nothing was posted.
+  const progress = (ctx: RunContext, message: string) =>
+    messagingTools.message_user!(ctx, callWith("message_user", { message }));
+
+  it("refuses a body that names a teammate, and names the route that reaches it", async () => {
+    const { ctx, findMany } = context("computer-team");
+    const result = (await progress(ctx, "Servo：把 staging 的迁移跑一遍")) as {
+      ok: boolean;
+      refused?: boolean;
+      error?: string;
+    };
+    expect(result).toMatchObject({ ok: false, refused: true });
+    expect(result.error).toContain("Nothing was sent");
+    expect(result.error).toContain("bot-servo");
+    expect(result.error).toContain("message_bot");
+    // The gate reads the roster once for the run.
+    expect(findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an id in the body too", async () => {
+    const { ctx } = context("computer-team");
+    await expect(progress(ctx, "please forward this to bot-servo")).resolves.toMatchObject({
+      ok: false,
+      refused: true,
+    });
+  });
+
+  it("reuses the roster it already read", async () => {
+    const { ctx, findMany } = context("computer-team");
+    await progress(ctx, "Servo：第一件事");
+    await progress(ctx, "Servo：第二件事");
+    expect(findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivers the same instruction in the same run once it goes to message_bot", async () => {
+    const { ctx } = context("computer-team");
+    const message = "Servo：把 staging 的迁移跑一遍";
+    await expect(progress(ctx, message)).resolves.toMatchObject({ ok: false, refused: true });
+    await expect(
+      messagingTools.message_bot!(ctx, callWith("message_bot", { message })),
+    ).resolves.toMatchObject({ ok: true, botId: "bot-servo" });
+    expect(mocks.messageBot).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ message, bot_id: "bot-servo" }),
+    );
+  });
+
+  it("still routes a body that names no teammate", async () => {
+    const { ctx } = context("computer-team");
+    // Past the gate, so with no reply state it fails on the publishing path instead of
+    // coming back as a teammate refusal.
+    const result = (await progress(ctx, "还在跑测试").catch((error: unknown) => error)) as
+      | { ok?: boolean; error?: string }
+      | Error;
+    expect(result instanceof Error || result.error !== "Nothing was sent").toBe(true);
+    expect(mocks.messageBot).not.toHaveBeenCalled();
+  });
+});
+
 describe("asking the advisor", () => {
   beforeEach(() => vi.clearAllMocks());
 

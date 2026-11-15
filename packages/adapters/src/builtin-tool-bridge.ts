@@ -37,6 +37,10 @@ export const CORE_BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set([
   "browser_act",
   "ask_user",
   "message_user",
+  // Delivery to a teammate is not a lookup: a dispatcher that has to spend a call on find_tool
+  // first reaches for the tool already in front of it, and message_user is the wrong one.
+  "message_bot",
+  "relay_to_bots",
   "request_takeover",
   "request_secret",
   "connect_app",
@@ -113,7 +117,7 @@ function bridgeTools(deferred: readonly ConnectorTool[]): ConnectorTool[] {
   return [
     {
       name: FIND_TOOL,
-      description: `Get the parameters of built-in tools not in your tool list, including ones your instructions name. Call this before use_tool. Pass names for exact tools or query to search. Core built-ins (shell, read_file, write_file, user_computer_shell, user_computer_read, computer_observe, ask_user, message_user, remember) are always in your tool list and never appear in this index: missing from search does not mean missing from your tools, so call them directly.\n${formatNameIndexText(groupedNames(searchEntries(deferred)))}`,
+      description: `Get the parameters of built-in tools not in your tool list, including ones your instructions name. Call this before use_tool. Pass names for exact tools or query to search. Core built-ins (shell, read_file, write_file, user_computer_shell, user_computer_read, computer_observe, ask_user, message_user, message_bot, relay_to_bots, remember) are always in your tool list and never appear in this index: missing from search does not mean missing from your tools, so call them directly — message_bot and relay_to_bots included.\n${formatNameIndexText(groupedNames(searchEntries(deferred)))}`,
       inputSchema: {
         type: "object",
         properties: {

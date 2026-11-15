@@ -572,7 +572,7 @@ async function onToolCalled(ctx: RunContext, event: RuntimeEvent<"tool">): Promi
   const stuckOnRefusal = refusals >= MAX_CONSECUTIVE_SOFT_REFUSALS;
   // Past the closing note (progressWindowRefusals >= MID_TURN_PROGRESS_WINDOW_REFUSALS, set in
   // the message_user handler) every further call is refused on receipt — the model has been
-  // told, in its own tool result, to write the final reply instead. The turn guard only ends
+  // told, in its own tool result, where the content goes instead. The turn guard only ends
   // the run here, at the give-up count, when it kept calling anyway. The refusal was the
   // clock and the note already said everything; the give-up stop stays silent (see
   // stopStuckToolLoop), and the run keeps whatever the model streamed.
@@ -650,10 +650,10 @@ async function stopStuckToolLoop(
   ctx.state.terminalCheckpointComplete = true;
   const overLimit = ctx.state.overLimitActionCalls;
   const humanName = humanizeToolName(toolName);
-  // The opening-window give-up is not a stuck loop: every refusal already told the model to
-  // write its final reply, so publishing one more explanation would put a system note in the
-  // chat where the person's answer should have been. This stop ends the run silently; the
-  // streamed reply (if any) was published above, and the person can simply ask again.
+  // The opening-window give-up is not a stuck loop: every refusal already told the model where
+  // the content goes, so publishing one more explanation would put a system note in the chat
+  // where the person's answer should have been. This stop ends the run silently; the streamed
+  // reply (if any) was published above, and the person can simply ask again.
   const silent = reason === "progressWindow";
   const stuckText =
     overLimit >= MAX_CONSECUTIVE_OVER_LIMIT_ACTION_CALLS

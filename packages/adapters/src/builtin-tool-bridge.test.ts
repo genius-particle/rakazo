@@ -37,9 +37,11 @@ describe("built-in tool bridge", () => {
       "connect_app",
       "find_tool",
       "list_files",
+      "message_bot",
       "message_user",
       "read_file",
       "read_history",
+      "relay_to_bots",
       "remember",
       "request_secret",
       "request_takeover",
@@ -64,8 +66,12 @@ describe("built-in tool bridge", () => {
     //
     // This number is an anti-bloat ratchet, not a model limit: it only says "do not grow".
     // The previous 33_080 line was already broken before this work (6fb3de4 measured 33_115).
-    // This change adds 67 bytes: the message_user / message_bot / relay_to_bots /
-    // handoff_to_bot descriptions now say a refused send posted nothing and must not be retried.
+    // A later fix added 67 bytes for refusal wording. This change raises it from 33_200 to
+    // 37_000 (+3_708): message_bot and relay_to_bots are now listed tools instead of
+    // find_tool results — the delivery route to a teammate is no longer a lookup — and their
+    // definitions plus the rewritten message_user and find_tool copy account for the growth.
+    // The trade is deliberate: two tool schemas cost less than a dispatcher that reaches for
+    // message_user because it is the only send tool in front of it.
     //
     // Do not try to buy room back by sharing schedule_create's branch specs through $defs.
     // That was tried and dropped, not deferred. One function already builds all six branches,
@@ -74,7 +80,7 @@ describe("built-in tool bridge", () => {
     // inlining the refs again saves no tokens. Measure definitionBytes before adding a tool or
     // a description; if it goes over, raise this line deliberately rather than trimming a
     // description another feature depends on.
-    expect(definitionBytes(listed)).toBeLessThanOrEqual(33_200);
+    expect(definitionBytes(listed)).toBeLessThanOrEqual(37_000);
     expect(deferred.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["render_plot", "create_space", "generate_secret", "scratchpad_add"]),
     );
