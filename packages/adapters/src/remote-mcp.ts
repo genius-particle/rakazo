@@ -44,7 +44,15 @@ import { dispatcherFetch, fetchPairedWithDispatcher } from "./undici-fetch.js";
 
 const DEFAULT_MAX_MCP_TOOLS = 250;
 const DEFAULT_MAX_MCP_PAGES = 20;
+/** Control-plane bound: connect, list and read. A server slower than this is broken. */
 const MCP_TIMEOUT_MS = 30_000;
+/**
+ * Bound on one `tools/call`. A repo agent or a build legitimately answers minutes
+ * later, and a call cut at the control-plane bound fails with
+ * `MCP error -32001: Request timed out` while the work keeps running on the far
+ * side. Defaults to the old value, so nothing changes until a deployment raises it.
+ */
+const MCP_CALL_TIMEOUT_MS = positiveIntegerOrDefault(process.env.MCP_CALL_TIMEOUT_MS, MCP_TIMEOUT_MS);
 const MAX_RESULT_BYTES = 1_000_000;
 
 export type { ResolveHostname } from "./network-address.js";
@@ -183,7 +191,7 @@ async function callMcpTool(
 ): Promise<unknown> {
   const result = await client.callTool({ name: toolName, arguments: args }, undefined, {
     signal,
-    timeout: MCP_TIMEOUT_MS,
+    timeout: MCP_CALL_TIMEOUT_MS,
   });
   const isError = result.isError === true;
   const envelope = {
@@ -310,7 +318,7 @@ async function withRemoteMcpClient<T>(
     options.resolveHostname ?? resolveHostname,
     policy,
   );
-  const signal = combineSignals(options.signal, AbortSignal.timeout(MCP_TIMEOUT_MS));
+  const signal = combineSignals(options.signal, AbortSignal.timeout(MCP_CALL_TIMEOUT_MS));
   const safeFetch = createSafeRemoteFetch(
     options.fetch,
     options.resolveHostname ?? resolveHostname,
@@ -383,7 +391,7 @@ export class RemoteMcpSessionCache {
       session.inFlight += 1;
       const controller = new AbortController();
       const deadlineReason = new DOMException("Timed out", "TimeoutError");
-      const deadline = setTimeout(() => controller.abort(deadlineReason), MCP_TIMEOUT_MS);
+      const deadline = setTimeout(() => controller.abort(deadlineReason), MCP_CALL_TIMEOUT_MS);
       const onAbort = () => controller.abort(options.signal?.reason);
       if (options.signal?.aborted) onAbort();
       else options.signal?.addEventListener("abort", onAbort, { once: true });
