@@ -118,6 +118,11 @@ background and its tools appear on a later turn. After a failure, runs skip that
 seconds, doubling up to 5 minutes while it keeps failing. A successful **Test connection** or
 discovery, or a change to the server's settings, ends the wait at once.
 
+One tool call has its own bound, `MCP_CALL_TIMEOUT_MS` (default 30000). Connecting, listing tools
+and reading a resource keep the 30-second bound; a `tools/call` that legitimately answers in
+minutes, such as a coding agent, needs this raised in `.env` on the API and worker. Unset, blank
+or invalid values fall back to 30000, so nothing changes until a deployment raises it.
+
 If a server shows its tools in **Settings** but a bot never uses them, run the
 [diagnostics report](./self-host.md#reporting-a-problem). Its **Assignment** column names any
 space or owner mismatch that keeps the server's tools from that bot.

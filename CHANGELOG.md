@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Self-hosters can give one MCP tool call more than 30 seconds with `MCP_CALL_TIMEOUT_MS`, for a server that answers in minutes such as a coding agent. Connecting, listing tools and reading a resource keep the 30-second bound, and leaving the setting unset keeps every call at 30 seconds as before ([tools and integrations](docs/self-host-integrations.md)).
+
 ### Fixed
 
 - Connecting an MCP server whose OAuth asks for many permissions, such as PostHog's, no longer fails with "MCP URL exceeds 2048 characters". The browser sign-in link now has its own, larger limit, while MCP server addresses keep the 2,048-character one.
