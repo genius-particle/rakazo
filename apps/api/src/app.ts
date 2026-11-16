@@ -403,6 +403,7 @@ async function buildApp(overrides: CreateAppOverrides): Promise<AppHandles> {
             onAnswered: createAdvisorReplyDelivery({
               prisma,
               events,
+              jobs,
               peerLabel: env.grokbotPeerLabel || "大娃",
             }),
           }),

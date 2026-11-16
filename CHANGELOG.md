@@ -12,6 +12,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- A bot that asks the advisor with `ask_grokbot` no longer ends its turn with "the advisor has not answered yet" and waits for someone to type at it. The call now blocks for the answer by default, and an answer that arrives after the turn ended is written into the chat **and** starts a new turn of that bot from it, so it carries on with the task on its own ([advisor channel](docs/grokbot-advisor-channel.md)).
+- Stopping a bot while it waits on the advisor keeps the stop final: the advisor's answer is still written into the chat when it arrives, but it no longer starts a new turn, which would have resumed the work that was just stopped.
 - Connecting an MCP server whose OAuth asks for many permissions, such as PostHog's, no longer fails with "MCP URL exceeds 2048 characters". The browser sign-in link now has its own, larger limit, while MCP server addresses keep the 2,048-character one.
 
 ## [0.8.0] - 2026-11-04

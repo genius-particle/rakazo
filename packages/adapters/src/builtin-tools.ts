@@ -1912,7 +1912,7 @@ export const builtinAgentTools: ConnectorTool[] = [
   {
     name: "ask_grokbot",
     description:
-      "Ask the senior advisor (大娃, an off-platform consultant webhook). Fire-and-forget by default: the call returns as soon as the question is sent, and the advisor's answer is posted into this thread later when it arrives — do not wait for it and do not call this tool again for the same question. Only pass wait:true (or an explicit timeout_ms) when you genuinely cannot continue without the answer; that blocks this turn until the reply arrives or the timeout passes. Use it only for what you cannot settle yourself: direction you cannot judge, an investigation that is stuck, or an arbitration only the advisor can make. Teammate bots are reached with message_bot / relay_to_bots instead; routine reporting never goes here. One self-contained question per call.",
+      "Ask the senior advisor (大娃, an off-platform consultant webhook). Blocks this turn until the advisor answers (10 minutes by default, 30 at most), then hands you the answer as the tool result — so one call is enough and the turn continues with it. If no answer arrives in time, stop waiting: a reply that lands later is posted into this thread and starts a new turn for you. Pass wait:false only for a genuinely side question whose answer can arrive whenever. Use it only for what you cannot settle yourself: direction you cannot judge, an investigation that is stuck, or an arbitration only the advisor can make. Teammate bots are reached with message_bot / relay_to_bots instead; routine reporting never goes here. One self-contained question per call.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1924,12 +1924,12 @@ export const builtinAgentTools: ConnectorTool[] = [
         wait: {
           type: "boolean",
           description:
-            "Set true to block this turn until the advisor replies. Omit for the default fire-and-forget behaviour.",
+            "Omit to block for the answer, which is the normal case. Pass false only when the answer can arrive after this turn: it is then posted into the thread and wakes you in a new turn.",
         },
         timeout_ms: {
           type: "number",
           description:
-            "Passing a positive value here by itself switches the call to blocking mode and is the longest wait: default 600000, minimum 5000, maximum 1800000. For a fire-and-forget call it only bounds how late a reply is still accepted.",
+            "How long to block for the answer: default 600000, minimum 5000, maximum 1800000. For wait:false it only bounds how late a reply is still accepted.",
         },
       },
       required: ["question"],

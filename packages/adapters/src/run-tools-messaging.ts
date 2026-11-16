@@ -87,14 +87,14 @@ function advisorErrorText(error: unknown): string {
 }
 
 /**
- * Whether the caller asked to block on the answer. Fire-and-forget is the
- * default, so a caller opts in explicitly: `wait: true`, or a positive
- * `timeout_ms` (which only makes sense when someone is waiting).
+ * Whether this call blocks for the answer. Blocking is the default: a bot that
+ * asked the advisor needs that answer to carry on, and the wait is bounded by
+ * the ask's own lifetime (10 min by default, 30 min at most) rather than by any
+ * generic tool timeout. `wait: false` opts into fire-and-forget, where the reply
+ * is written into the thread and a fresh run picks it up from there.
  */
 export function advisorWaitRequested(args: Record<string, unknown>): boolean {
-  if (args.wait === true) return true;
-  const raw = Number(args.timeout_ms);
-  return Number.isFinite(raw) && raw > 0;
+  return args.wait !== false;
 }
 
 /**
@@ -546,22 +546,28 @@ export const messagingTools: ToolHandlers = {
       await failGrokbotAsk(deps.prisma, correlation).catch(() => undefined);
       return call.finish({ error: `advisor send failed: ${advisorErrorText(error)}` });
     }
-    // Default: the question is out. The answer lands in this thread later, so
-    // this turn is free to carry on instead of spinning for minutes.
+    // Default: block until the advisor answers or this ask's own timeout ends.
+    // The wait reads the ask row, so no tool-level deadline applies to it, and
+    // an interrupted wait leaves the ask answerable for the thread to pick up.
+    // The run id is handed over so a Stop can be told from an interruption: only
+    // the latter may start a new turn when the reply finally arrives.
     if (!blocking) {
       return call.finish({
         ok: true,
         accepted: true,
         correlation,
-        note: "Sent. This call does not wait for an answer: the advisor's reply will be posted into this thread when it arrives, usually minutes later. Do not call ask_grokbot again for this question, and do not keep the turn open for it — continue with what you can do now or end your turn.",
+        note: "Sent without waiting. The advisor's reply will be posted into this thread when it arrives, and a new turn of yours starts from it — so do not call ask_grokbot again for this question.",
       });
     }
-    const reply = await waitGrokbotReply(deps.prisma, correlation, { signal: context.signal });
+    const reply = await waitGrokbotReply(deps.prisma, correlation, {
+      signal: context.signal,
+      runId: run.id,
+    });
     if (reply === null) {
       return call.finish({
         ok: false,
         correlation,
-        note: `No reply within ${Math.round(timeoutMs / 1000)}s. Continue without it or ask again later; do not keep the user waiting on this channel.`,
+        note: `No reply within ${Math.round(timeoutMs / 1000)}s. Stop waiting on it: if the advisor answers after this turn ends, the reply still lands in this thread and starts a new turn for you — so do not call ask_grokbot again for the same question and do not report the silence to the user as an answer.`,
       });
     }
     return call.finish({ ok: true, correlation, reply });

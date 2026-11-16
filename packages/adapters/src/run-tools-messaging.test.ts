@@ -38,7 +38,7 @@ const grokbot = vi.hoisted(() => ({
     delivery: "async" as const,
   })),
   failGrokbotAsk: vi.fn(async (..._args: unknown[]) => undefined),
-  waitGrokbotReply: vi.fn(async (..._args: unknown[]) => "advisor answer"),
+  waitGrokbotReply: vi.fn(async (..._args: unknown[]): Promise<string | null> => "advisor answer"),
 }));
 vi.mock("./grokbot/ask-store.js", () => grokbot);
 
@@ -415,15 +415,39 @@ describe("asking the advisor", () => {
     return { ctx, sendToMessagingThread };
   }
 
-  it("returns as soon as the question is sent, without waiting for the advisor", async () => {
+  it("blocks for the answer by default and hands it back", async () => {
     const { ctx, sendToMessagingThread } = advisorContext();
     const result = await messagingTools.ask_grokbot!(
       ctx,
       callWith("ask_grokbot", { question: "should we ship?" }),
     );
 
-    expect(result).toMatchObject({ ok: true, accepted: true, correlation: "re-test" });
+    expect(result).toMatchObject({ ok: true, reply: "advisor answer", correlation: "re-test" });
     expect(sendToMessagingThread).toHaveBeenCalledTimes(1);
+    expect(grokbot.createGrokbotAsk).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ delivery: "sync" }),
+    );
+    // Blocking is the whole point: the same turn acts on the answer instead of
+    // ending without it and needing a second wake-up.
+    expect(grokbot.waitGrokbotReply).toHaveBeenCalledTimes(1);
+    // The waiting run goes along with the correlation: on an abort its status is
+    // what tells a person's Stop from an infrastructure interruption.
+    expect(grokbot.waitGrokbotReply).toHaveBeenCalledWith(
+      expect.anything(),
+      "re-test",
+      expect.objectContaining({ runId: "run-1" }),
+    );
+  });
+
+  it("returns at once only when the caller opts out of waiting", async () => {
+    const { ctx } = advisorContext();
+    const result = await messagingTools.ask_grokbot!(
+      ctx,
+      callWith("ask_grokbot", { question: "should we ship?", wait: false }),
+    );
+
+    expect(result).toMatchObject({ ok: true, accepted: true });
     expect(grokbot.createGrokbotAsk).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ delivery: "async" }),
@@ -431,22 +455,7 @@ describe("asking the advisor", () => {
     expect(grokbot.waitGrokbotReply).not.toHaveBeenCalled();
   });
 
-  it("blocks only when the caller asks to wait", async () => {
-    const { ctx } = advisorContext();
-    const result = await messagingTools.ask_grokbot!(
-      ctx,
-      callWith("ask_grokbot", { question: "should we ship?", wait: true }),
-    );
-
-    expect(result).toMatchObject({ ok: true, reply: "advisor answer" });
-    expect(grokbot.createGrokbotAsk).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ delivery: "sync" }),
-    );
-    expect(grokbot.waitGrokbotReply).toHaveBeenCalledTimes(1);
-  });
-
-  it("treats an explicit timeout as a request to block", async () => {
+  it("passes an explicit timeout through as the ask's lifetime", async () => {
     const { ctx } = advisorContext();
     await messagingTools.ask_grokbot!(
       ctx,
@@ -455,23 +464,23 @@ describe("asking the advisor", () => {
 
     expect(grokbot.createGrokbotAsk).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ delivery: "sync" }),
+      expect.objectContaining({ delivery: "sync", timeoutMs: 30_000 }),
     );
     expect(grokbot.waitGrokbotReply).toHaveBeenCalledTimes(1);
   });
 
-  it("returns even when the advisor never answers", async () => {
+  it("stops waiting when the advisor never answers, without saying it was answered", async () => {
     const { ctx } = advisorContext();
-    // The blocking path would sit on this promise; the default path must not
-    // touch it at all.
-    grokbot.waitGrokbotReply.mockImplementationOnce(() => new Promise<string>(() => {}));
-    const started = Date.now();
+    grokbot.waitGrokbotReply.mockResolvedValueOnce(null);
     const result = await messagingTools.ask_grokbot!(
       ctx,
       callWith("ask_grokbot", { question: "should we ship?" }),
     );
-    expect(Date.now() - started).toBeLessThan(1_000);
-    expect(result).toMatchObject({ ok: true, accepted: true });
+
+    // A late reply still lands in the thread and starts a run, so the model must
+    // not ask again and must not present the silence as the advisor's answer.
+    expect(result).toMatchObject({ ok: false, correlation: "re-test" });
+    expect(JSON.stringify(result)).toContain("starts a new turn");
   });
 
   it("fails the ask when the send fails, leaving nothing open", async () => {

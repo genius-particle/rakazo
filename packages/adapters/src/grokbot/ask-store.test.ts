@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createGrokbotAsk, createPrismaGrokbotAskStore } from "./ask-store.js";
+import { createGrokbotAsk, createPrismaGrokbotAskStore, waitGrokbotReply } from "./ask-store.js";
 
 type Row = {
   id: string;
@@ -16,14 +16,17 @@ type Row = {
 
 /**
  * Only the calls the store makes: findFirst filtered by correlation/status/expiry,
- * a conditional updateMany, and create. Enough to prove the state machine without
- * a database.
+ * a conditional updateMany, the asking run's status, and create. Enough to prove
+ * the state machine without a database.
  */
-function fakePrisma(initial: Row | null) {
+function fakePrisma(initial: Row | null, runStatus: string | null = "running") {
   const row = initial ? { ...initial } : null;
   const updates: Array<{ where: Record<string, unknown>; data: Record<string, unknown> }> = [];
   const creates: Array<Record<string, unknown>> = [];
   const prisma = {
+    run: {
+      findUnique: async () => (runStatus ? { status: runStatus } : null),
+    },
     grokbotAsk: {
       findFirst: async ({
         where,
@@ -102,11 +105,33 @@ describe("grokbot ask store", () => {
     expect(row?.status).toBe("answered");
     expect(row?.reply).toBe("yes");
     // The run waiting on the row reads it from there; a second copy in the
-    // thread would show the answer twice.
+    // thread would show the answer twice, and a follow-up run would repeat the
+    // work the waiting turn is already doing.
     expect(onAnswered).not.toHaveBeenCalled();
   });
 
-  it("delivers a fire-and-forget ask into its thread", async () => {
+  it("wakes the bot when a blocking ask's run has already ended", async () => {
+    // The waiter is gone but the row still looks pending: nothing polls it, so
+    // the answer has to reach the thread or it is lost.
+    const { prisma, row } = fakePrisma(openRow({ status: "pending" }), "completed");
+    const onAnswered = vi.fn(async () => undefined);
+    const store = createPrismaGrokbotAskStore(prisma, { onAnswered });
+
+    await expect(store.resolveReply("re-abc", "yes")).resolves.toBe(true);
+    expect(row?.status).toBe("answered");
+    expect(onAnswered).toHaveBeenCalledWith(
+      {
+        correlation: "re-abc",
+        botId: "bot_1",
+        runId: "run_1",
+        question: "should we ship?",
+        wake: true,
+      },
+      "yes",
+    );
+  });
+
+  it("delivers a fire-and-forget ask into its thread and wakes the bot", async () => {
     const { prisma, row } = fakePrisma(openRow({ status: "accepted" }));
     const onAnswered = vi.fn(async () => undefined);
     const store = createPrismaGrokbotAskStore(prisma, { onAnswered });
@@ -120,9 +145,61 @@ describe("grokbot ask store", () => {
         botId: "bot_1",
         runId: "run_1",
         question: "should we ship?",
+        wake: true,
       },
       "ship it",
     );
+  });
+
+  it("delivers a reply whose wait was cut off instead of calling it unknown", async () => {
+    // Aborted waits are marked abandoned, not expired: the correlation must stay
+    // answerable or the advisor's retry would be refused.
+    const { prisma, row } = fakePrisma(openRow({ status: "abandoned" }));
+    const onAnswered = vi.fn(async () => undefined);
+    const store = createPrismaGrokbotAskStore(prisma, { onAnswered });
+
+    await expect(store.resolveReply("re-abc", "late but useful")).resolves.toBe(true);
+    expect(row?.status).toBe("answered");
+    expect(onAnswered).toHaveBeenCalledWith(
+      expect.objectContaining({ wake: true }),
+      "late but useful",
+    );
+  });
+
+  it("writes a stopped ask's reply to the thread without waking the bot", async () => {
+    // A Stop is newer than the question: the answer is worth keeping, a run is
+    // not — starting one would restart the work the person just ended.
+    const { prisma, row } = fakePrisma(openRow({ status: "cancelled" }), "cancelled");
+    const onAnswered = vi.fn(async () => undefined);
+    const store = createPrismaGrokbotAskStore(prisma, { onAnswered });
+
+    await expect(store.resolveReply("re-abc", "too late, we stopped")).resolves.toBe(true);
+    expect(row?.status).toBe("answered");
+    expect(onAnswered).toHaveBeenCalledWith(
+      // No `wake` at all, and no `late`: this is a plain answer that arrived
+      // after a Stop, not a waiter that gave up.
+      {
+        correlation: "re-abc",
+        botId: "bot_1",
+        runId: "run_1",
+        question: "should we ship?",
+      },
+      "too late, we stopped",
+    );
+  });
+
+  it("stays quiet when the Stop has already ended the run but the row still says pending", async () => {
+    // The Stop can land between the wait being cut and the webhook arriving: the
+    // row has not been rewritten yet, but the run is already `cancelled`. The run
+    // status wins, because waking here would undo the Stop.
+    const { prisma, row } = fakePrisma(openRow({ status: "pending" }), "cancelled");
+    const onAnswered = vi.fn(async (_ask: unknown, _reply: string) => undefined);
+    const store = createPrismaGrokbotAskStore(prisma, { onAnswered });
+
+    await expect(store.resolveReply("re-abc", "answered after the stop")).resolves.toBe(true);
+    expect(row?.status).toBe("answered");
+    expect(onAnswered).toHaveBeenCalledTimes(1);
+    expect(onAnswered.mock.calls[0]?.[0]).not.toHaveProperty("wake");
   });
 
   it("reports a second reply for the same correlation as a miss", async () => {
@@ -163,9 +240,31 @@ describe("grokbot ask store", () => {
         runId: "run_1",
         question: "should we ship?",
         late: true,
+        wake: true,
       },
       "too late but done",
     );
+  });
+
+  it("does not wake a bot for a late reply to work that was stopped", async () => {
+    const { prisma, row } = fakePrisma(
+      openRow({ status: "expired", expiresAt: new Date(Date.now() - 1_000) }),
+      "cancelled",
+    );
+    const onAnswered = vi.fn(async (_ask: unknown, _reply: string) => undefined);
+    const store = createPrismaGrokbotAskStore(prisma, { onAnswered });
+
+    // The ask timed out and the person had already stopped the run: the answer
+    // still belongs in the thread, but nothing may start again.
+    await expect(store.resolveReply("re-abc", "arrived after everything ended")).resolves.toBe(
+      true,
+    );
+    expect(row?.status).toBe("answered");
+    expect(onAnswered).toHaveBeenCalledWith(
+      expect.objectContaining({ late: true }),
+      "arrived after everything ended",
+    );
+    expect(onAnswered.mock.calls[0]?.[0]).not.toHaveProperty("wake");
   });
 
   it("still refuses a reply that is days past the grace window", async () => {
@@ -193,6 +292,58 @@ describe("grokbot ask store", () => {
     // A delivery bug must not turn into a 500 the advisor would retry forever.
     await expect(store.resolveReply("re-abc", "ship it")).resolves.toBe(true);
     expect(row?.status).toBe("answered");
+  });
+});
+
+describe("waitGrokbotReply", () => {
+  it("leaves an interrupted ask answerable instead of expiring it", async () => {
+    const { prisma, row } = fakePrisma(openRow({ status: "pending" }));
+    const abort = new AbortController();
+    const waiting = waitGrokbotReply(prisma, "re-abc", {
+      signal: abort.signal,
+      pollMs: 50,
+      runId: "run_1",
+    });
+    abort.abort();
+
+    await expect(waiting).resolves.toBeNull();
+    // `abandoned`, not `expired`: the advisor may still answer this correlation,
+    // and that answer has to reach the thread rather than be called unknown.
+    expect(row?.status).toBe("abandoned");
+  });
+
+  it("marks the ask cancelled when the run was stopped by a person", async () => {
+    // The worker only learns about a Stop on its next lease renewal, so this is
+    // the abort the tool actually sees. The run's own status is the only thing
+    // that separates it from a lease loss.
+    const { prisma, row } = fakePrisma(openRow({ status: "pending" }), "cancelled");
+    const abort = new AbortController();
+    const waiting = waitGrokbotReply(prisma, "re-abc", {
+      signal: abort.signal,
+      pollMs: 50,
+      runId: "run_1",
+    });
+    abort.abort();
+
+    await expect(waiting).resolves.toBeNull();
+    // Answerable, so the advisor's reply is still claimed — but the row records
+    // that a person ended this, so no follow-up run starts.
+    expect(row?.status).toBe("cancelled");
+  });
+
+  it("expires an ask that reaches its own timeout", async () => {
+    const { prisma, row } = fakePrisma(
+      openRow({ status: "pending", expiresAt: new Date(Date.now() - 1_000) }),
+    );
+
+    await expect(
+      waitGrokbotReply(prisma, "re-abc", {
+        signal: new AbortController().signal,
+        pollMs: 50,
+        runId: "run_1",
+      }),
+    ).resolves.toBeNull();
+    expect(row?.status).toBe("expired");
   });
 });
 

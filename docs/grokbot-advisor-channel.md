@@ -13,27 +13,43 @@ pipeline. One provider (`grokbot`), one tool (`ask_grokbot`).
   transcripts, no routine outputs, no statuses. Only an explicit `ask_grokbot`
   question goes out, and only its reply comes back.
 - **回环不可能**: inbound replies resolve the open ask *before* any run
-  logic. No messaging run is created for them, no ack/receipt is pushed, and
-  anything uncorrelated or at hop ≥ 1 is dropped with a log line. A reply for a
-  fire-and-forget ask is appended to the asking thread as a bot message — a
-  message write, never a new run, so it cannot become another question.
+  logic, and the follow-up run a reply may start is an ordinary chat run on the
+  asking bot, never a messaging run on this channel: no question is posted back
+  out, no ack/receipt is pushed, and anything uncorrelated or at hop ≥ 1 is
+  dropped with a log line.
 
-## Async by default, blocking on request
+## Blocking by default, and a follow-up run when the wait ends
 
-`ask_grokbot` is **fire-and-forget by default**: the call returns as soon as the
-question is posted, and the advisor's answer is written into the same thread
-when it arrives (marked 「顾问（大娃）答复」). The asking turn keeps working or
-ends; nobody waits minutes on the tool.
+`ask_grokbot` **blocks** until the advisor answers: the call sits on its ask row
+(no generic tool deadline applies) and returns the answer as the tool result, so
+the same turn carries on with it. The wait is bounded by the ask's own lifetime —
+`MESSAGING_GROKBOT_REPLY_TIMEOUT_MS`, 10 minutes by default, 30 minutes at most.
 
-A caller that genuinely cannot continue without the answer opts in explicitly —
-`wait: true`, or any positive `timeout_ms`. Only then does the tool poll the ask
-row, and only then does the reply come back as the tool result. A blocking ask
-that times out returns `ok: false` and leaves no run behind.
+A caller that only wants to drop the question off passes `wait: false`. Then, as
+for any reply no run is waiting on, the answer is written into the asking thread
+(marked 「顾问（大娃）答复」) **and** a normal `follow_up` run is started on the
+bot that asked, in its own thread, prompted to act on the answer. That is the
+path that keeps a bot moving when its turn already ended, when the wait was cut
+by an interruption, or when the reply lands after the ask's own timeout.
+
+An interrupted wait does not close the ask: the row becomes `abandoned` rather
+than `expired`, so the correlation stays answerable and the reply that arrives
+later is delivered instead of being refused as `unknown_correlation`.
+
+**A Stop is not an interruption.** The worker only learns about a Stop on its
+next lease renewal — a silent abort, indistinguishable at the tool level from a
+lease loss — so the row is classified by the run's own status: `cancelled` when a
+person stopped it, `abandoned` otherwise. Both stay answerable, but only
+`abandoned` wakes the bot. A `cancelled` ask's reply is written into the thread
+and nothing else: starting a run there would resume the work the Stop ended.
 
 | Mode | Ask row status | Who reads the reply |
 | --- | --- | --- |
-| default (async) | `accepted` | the API appends it to the asking thread |
-| explicit wait | `pending` | the polling tool call returns it |
+| default (blocking) | `pending` | the polling tool call returns it; no second run |
+| `wait: false` | `accepted` | the thread, plus a follow-up run |
+| wait cut by an interruption | `abandoned` | the thread, plus a follow-up run |
+| wait cut by Stop | `cancelled` | the thread only — no run |
+| past its timeout | `expired` | the thread, plus a follow-up run (late, within grace; none if the run was stopped) |
 
 ## Environment (all three secrets required together)
 
@@ -45,7 +61,7 @@ that times out returns `ok: false` and leaves no run behind.
 | `MESSAGING_GROKBOT_ADDRESS` | Our wire label (default `rakazo`) |
 | `MESSAGING_GROKBOT_PEER_ADDRESS` | 大娃's wire label (default `dawa`) |
 | `MESSAGING_GROKBOT_PEER_LABEL` | 大娃's display label (default `大娃`) |
-| `MESSAGING_GROKBOT_REPLY_TIMEOUT_MS` | Ask lifetime (default 600000, max 1800000). For an explicit-wait call it is also the longest wait; for a default async call it is how late a reply is still delivered |
+| `MESSAGING_GROKBOT_REPLY_TIMEOUT_MS` | Ask lifetime (default 600000, max 1800000). It is both the longest a blocking call waits and how late a reply is still delivered |
 
 When the three secrets are set, `messagingPlatformsFromEnv` mounts the
 `grokbot` platform; `isMessagingSurfaceEnabled` then sees a non-empty platform
@@ -124,16 +140,19 @@ through chat.
   with the bearer and `{}` → JSON 400; the route must not be an HTML login page
   or a plain-text 404 (404 = runtime not mounted).
 - **Ask lifecycle**: rows in `grokbot_asks` are operational scratch
-  (`pending`/`accepted` → `answered` / `expired` / `failed`). Truncating the
-  table is safe; a reply whose row is gone gets `unknown_correlation`.
-- **Timeouts**: an explicit-wait call returns `ok: false` when it times out and
-  the ask expires; no run is left waiting. A reply that arrives **after** the
-  wait ended is not lost: nobody is polling the row any more, so it is appended
-  to the thread that asked (meta reads `顾问（…）答复（迟到）`) and the webhook
-  reports `resolved`. The grace window is 24 h
-  (`LATE_REPLY_GRACE_MS`); past that the row stays `expired` and the reply gets
-  `unknown_correlation`. Measured peer latency on the live channel is 16–25 s,
-  so any explicit `timeout_ms` below ~30 s will always expire.
+  (`pending`/`accepted`/`abandoned`/`cancelled` → `answered` / `expired` /
+  `failed`). Truncating the table is safe; a reply whose row is gone gets
+  `unknown_correlation`.
+- **Timeouts**: a blocking call that reaches the ask's lifetime returns
+  `ok: false` and the row expires; an interruption marks it `abandoned`, a
+  person's Stop marks it `cancelled`. Both keep the correlation answerable, so a
+  reply that arrives afterwards is not lost: it is appended to the thread that
+  asked (meta reads `顾问（…）答复（迟到）` when the ask had expired) and the
+  webhook reports `resolved`. A follow-up run starts on the bot that asked unless
+  the run was stopped — a Stop is a decision, and re-running it is not the
+  platform's call. The grace window is 24 h (`LATE_REPLY_GRACE_MS`); past that
+  the row stays `expired` and the reply gets `unknown_correlation`. Measured peer
+  latency on the live channel is 16–25 s.
 - **No files, no groups, no history**: questions and replies are text only, one
   1:1 thread per peer.
 

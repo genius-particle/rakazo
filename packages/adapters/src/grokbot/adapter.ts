@@ -10,9 +10,9 @@ import type { GrokbotAskStore } from "./ask-store.js";
  * deployment); the advisor's routine POSTs the reply back to this deployment's
  * `/api/v1/messaging/webhook/grokbot` with the inbound bearer. Replies resolve
  * open `ask_grokbot` calls through the ask store: a blocking ask hands the text
- * back to its waiting run, a fire-and-forget ask has it appended to the thread
- * that asked. Nothing here creates messaging runs — so the channel cannot echo,
- * loop, or fan out on its own.
+ * back to its waiting run, while a reply nobody is waiting on is appended to the
+ * thread that asked and wakes that bot with an ordinary follow-up run. This
+ * adapter never creates a messaging run, so the channel cannot echo or loop.
  */
 
 export const GROKBOT_PROVIDER = "grokbot";
